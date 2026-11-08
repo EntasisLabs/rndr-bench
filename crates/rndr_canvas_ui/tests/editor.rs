@@ -265,7 +265,9 @@ fn typing_creates_text_and_double_click_edits_it() {
         &EstimateMeasure,
     );
     rig.key(Key::Escape, NONE);
-    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "Hi!"));
+    // Entering through a double click now positions the caret at the click,
+    // rather than silently appending to the end.
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "!Hi"));
 }
 
 #[test]

@@ -12,8 +12,8 @@ Paint and edit [`rndr_canvas`](../rndr_canvas) documents with `rndr_paint`,
 | `panels` | Toolbar, arrange buttons, stroke/fill swatches, widths, text sizes and a layers list (select, hide, lock), built from `rndr_ui` buttons. |
 
 Text is measured with the world's `TextEngine` (`EngineMeasure`), so
-picking text lines up with what is painted. Without an engine the
-estimate from `rndr_canvas` is used.
+picking text lines up with what is painted. An absent explicit engine uses
+core's builtin engine, just as painting does.
 
 ## Editing model
 
@@ -61,14 +61,53 @@ app.add_system(Schedule::Update, |world: &mut World| {
 `examples/canvas-editor` is a complete app; `--export out.png` writes a frame
 without opening a window.
 
+## Interactive text
+
+Double-click a text object, use the Text tool to create one, or call
+`CanvasEditor::edit_text(id)`. Pointer clicks place the caret; dragging and
+Shift-click extend a directed selection. Arrows, Shift-arrows, Home/End,
+word/document motion, insertion, deletion and platform copy/cut/paste reuse
+core's `Buffer` and native editor interpreter. Home/End and platform-specific
+modifiers are available through native `Input::keys` in `view::update`.
+
+Escape or Primary+Enter commits and exits (plain Enter inserts a newline).
+Leaving canvas focus or switching tools also commits. A whole text session
+is one `CanvasStore` transaction; undo while editing commits the draft, exits,
+then undoes that transaction. Object gestures share the same store history.
+No-op sessions do not add history. A refused save is exposed by `last_error`;
+conflicts reload rather than undoing another editor's transaction.
+
+`view::update` owns keyboard input only when its SurfaceSlot has focus or
+receives a press. Other controls keep their input. Hosts that start editing
+from a toolbar should explicitly `request_focus(world, slot_entity)` after
+`edit_text`. The view adds `Focusable` to its slot; add it at construction if
+requesting focus before the first update. For earliest shortcut ownership,
+register `view::update` at the front of Input after installing UI plugins;
+keep `take_wheel` before scrolling. If invoking it from Update as above, put
+it before application shortcut handlers. Never run it twice in one frame.
+
+Read-only inspection APIs are `editing_text`, `text_selection` (directed
+caret/anchor UTF-8 bytes), and `text_geometry` (scene-space caret and selection
+quads including ancestor rotation). `set_text_engine` supports direct headless
+drivers; installed views supply the world's engine automatically. `nodes()`
+contains the draft without preedit; `scene()` includes transient preedit for
+painting. `finish_text`, `reload`, `undo`, and `redo` remain available.
+
+See [TEXT_EDITING.md](TEXT_EDITING.md) for architecture, executable regression
+evidence and the native verification boundary.
+
 ## Limits
 
-- Text is typed and erased at the end only: no caret placement, selection
-  or IME composition inside the canvas.
+- Text editing is plain text. The first byte-changing edit clears inline
+  style spans, while retaining the object's base font/layout. Undo restores
+  the original styled object.
+- One editing session is one undo step, not a per-keystroke undo stack.
+  Preferred vertical column is recomputed between delivered input batches.
+- Native IME and OS clipboard behavior require platform testing. Headless
+  tests cover composition filtering, transient preedit and one-time commit,
+  not an actual platform input method or OS clipboard round trip.
 - The inspector applies its swatches and sizes to the selection and to new
   nodes; it does not read the selected node's current style, and offers
   fixed swatches rather than a color picker.
-- Keys reach the editor whenever the view updates; an app with other text
-  inputs should only call `view::update` while the canvas has focus.
 - Image assets are drawn from texture ids the app supplies in
   `CanvasView::images`; the editor does not import images yet.

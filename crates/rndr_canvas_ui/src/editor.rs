@@ -243,12 +243,24 @@ pub struct Response {
     pub cursor: CursorHint,
 }
 
+/// Text editing chrome in scene coordinates, including ancestor transforms.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextGeometry {
+    /// Clockwise caret corners; its width remains one view point under zoom.
+    pub caret: [Vec2; 4],
+    /// Selection fragments in the same coordinates as scene painting.
+    pub selection: Vec<[Vec2; 4]>,
+}
+
 #[derive(Debug, Clone)]
 struct TextEdit {
     id: String,
     /// The saved node, or `None` for a node created by this edit.
     original: Option<Node>,
     node: Node,
+    buffer: rndr_core::Buffer,
+    dragging: bool,
+    preview: rndr_core::ImePreview,
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +321,7 @@ pub struct CanvasEditor {
     pub snapping: Snapping,
     gesture: Gesture,
     text: Option<TextEdit>,
+    text_engine: Arc<dyn rndr_core::TextEngine>,
     overlay: Overlay,
     last_error: Option<CanvasError>,
     seed: u64,
@@ -343,6 +356,7 @@ impl CanvasEditor {
             snapping: Snapping::default(),
             gesture: Gesture::Idle,
             text: None,
+            text_engine: rndr_core::text_engine(&rndr_core::World::new()),
             overlay: Overlay::default(),
             last_error: None,
             seed: now_seed() & 0xffff_ffff,
@@ -373,10 +387,21 @@ impl CanvasEditor {
         nodes
     }
 
-    /// The scene to paint, with [`CanvasEditor::nodes`].
+    /// The scene to paint, with [`CanvasEditor::nodes`] and transient IME preedit.
     pub fn scene(&self) -> rndr_canvas::Scene {
         let mut scene = self.current.document.scene.clone();
         scene.nodes = self.nodes();
+        if let Some(edit) = self
+            .text
+            .as_ref()
+            .filter(|edit| !edit.preview.text.is_empty())
+        {
+            if let Some(node) = scene.nodes.iter_mut().find(|n| n.id == edit.id) {
+                if let Content::Text { text, .. } = &mut node.content {
+                    text.insert_str(edit.buffer.caret, &edit.preview.text);
+                }
+            }
+        }
         scene
     }
 
@@ -399,6 +424,66 @@ impl CanvasEditor {
     /// Id of the text node being typed into.
     pub fn editing_text(&self) -> Option<&str> {
         self.text.as_ref().map(|t| t.id.as_str())
+    }
+
+    /// Directed `(caret, anchor)` UTF-8 byte offsets in the current text draft.
+    pub fn text_selection(&self) -> Option<(usize, usize)> {
+        self.text
+            .as_ref()
+            .map(|t| (t.buffer.caret, t.buffer.anchor))
+    }
+
+    /// Shapes text with exactly the painter's font, spans, padding and wrapping.
+    pub fn text_geometry(&self, measure: &dyn TextMeasure) -> Option<TextGeometry> {
+        let edit = self.text.as_ref()?;
+        let scene = self.scene();
+        let index = SceneIndex::with_measure(&scene.nodes, measure);
+        let node = index.get(&edit.id)?;
+        let (width, _) = index.dimensions(node);
+        let source = crate::paint::text_source(node, width)?;
+        let layout =
+            self.text_engine
+                .layout(&source.text, &source.style, &source.spans, source.max_width);
+        let matrix = index.world_matrix(node);
+        let quad = |x: f32, y: f32, w: f32, h: f32| {
+            Rect::new(
+                f64::from(x + source.origin[0]),
+                f64::from(y + source.origin[1]),
+                f64::from(w),
+                f64::from(h),
+            )
+            .corners()
+            .map(|p| matrix.apply(p))
+        };
+        let caret = edit.buffer.caret
+            + edit
+                .preview
+                .cursor
+                .map_or(edit.preview.text.len(), |(_, end)| {
+                    end.min(edit.preview.text.len())
+                });
+        let (x, y) = layout.caret_xy(caret);
+        let height = layout
+            .lines
+            .iter()
+            .rev()
+            .find(|line| line.start <= caret)
+            .map_or(source.style.size * 1.3, |line| line.h);
+        Some(TextGeometry {
+            caret: quad(x, y, (1.0 / self.camera.zoom.max(1e-6)) as f32, height),
+            selection: layout
+                .selection_boxes(
+                    edit.buffer.caret,
+                    if edit.preview.text.is_empty() {
+                        edit.buffer.anchor
+                    } else {
+                        edit.buffer.caret
+                    },
+                )
+                .iter()
+                .map(|r| quad(r.x, r.y, r.w, r.h))
+                .collect(),
+        })
     }
 
     /// The last refused save, cleared by the next successful one.
@@ -432,7 +517,8 @@ impl CanvasEditor {
     /// Re-reads the document from the store, dropping any preview.
     pub fn reload(&mut self) -> Result<(), CanvasError> {
         self.current = self.store.get(&self.current.document.id)?;
-        self.draft = None;
+        self.text = None;
+        self.cancel_gesture();
         self.prune_selection();
         Ok(())
     }
@@ -489,7 +575,13 @@ impl CanvasEditor {
     }
 
     fn history(&mut self, redo: bool) -> bool {
+        let editing = self.text.is_some();
         self.finish_text();
+        // A refused draft publication is a consumed command, not permission
+        // to traverse the reloaded document's unrelated history.
+        if editing && self.last_error.is_some() {
+            return false;
+        }
         self.cancel_gesture();
         if (redo && !self.current.can_redo) || (!redo && !self.current.can_undo) {
             return false;
@@ -758,10 +850,15 @@ impl CanvasEditor {
         }
     }
 
-    /// Starts typing into an existing text node.
+    /// Starts editing an editable text node with the caret at its end.
+    /// Re-entering the active node preserves its draft and directed selection.
     pub fn edit_text(&mut self, id: &str) -> bool {
+        if self.editing_text() == Some(id) {
+            return true;
+        }
         self.finish_text();
-        let Some(node) = SceneIndex::new(self.index_nodes()).get(id).cloned() else {
+        let index = SceneIndex::new(self.index_nodes());
+        let Some(node) = index.get(id).filter(|node| index.editable(node)).cloned() else {
             return false;
         };
         if !matches!(node.content, Content::Text { .. }) {
@@ -770,44 +867,170 @@ impl CanvasEditor {
         self.text = Some(TextEdit {
             id: node.id.clone(),
             original: Some(node.clone()),
+            buffer: match &node.content {
+                Content::Text { text, .. } => rndr_core::Buffer::from_str(text),
+                _ => unreachable!(),
+            },
+            dragging: false,
             node,
+            preview: rndr_core::ImePreview::default(),
         });
         true
     }
 
     fn type_text(&mut self, typed: &str, keys: &[(Key, Modifiers)]) -> bool {
+        if typed.is_empty() && keys.is_empty() {
+            return false;
+        }
+        use rndr_core::{Input, KeyEvent, LogicalKey, NamedKey};
+        let mut input = Input::default();
+        for &(key, mods) in keys {
+            let modifiers = rndr_core::Modifiers {
+                shift: mods.shift,
+                alt: mods.alt,
+                ctrl: mods.primary,
+                ..rndr_core::Modifiers::new()
+            };
+            let named = match key {
+                Key::Left => Some(NamedKey::ArrowLeft),
+                Key::Right => Some(NamedKey::ArrowRight),
+                Key::Up => Some(NamedKey::ArrowUp),
+                Key::Down => Some(NamedKey::ArrowDown),
+                Key::Backspace => Some(NamedKey::Backspace),
+                Key::Delete => Some(NamedKey::Delete),
+                Key::Enter => Some(NamedKey::Enter),
+                _ => None,
+            };
+            if let Some(named) = named {
+                input.keys.push(KeyEvent::named(named, modifiers));
+            } else if let Key::Char(ch) = key {
+                let mut event = KeyEvent::character(ch, modifiers);
+                // The compatibility API supplies typed text separately.
+                event.text = None;
+                input.keys.push(event);
+            }
+        }
+        if !typed.is_empty() {
+            input.keys.push(KeyEvent {
+                logical: LogicalKey::Unidentified,
+                ..KeyEvent::character(' ', rndr_core::Modifiers::new()).with_text(typed)
+            });
+        }
+        self.text_input(
+            input,
+            rndr_core::Platform::X11,
+            &mut rndr_core::Clipboard::default(),
+        )
+    }
+
+    fn text_input(
+        &mut self,
+        input: rndr_core::Input,
+        platform: rndr_core::Platform,
+        clipboard: &mut rndr_core::Clipboard,
+    ) -> bool {
         let Some(edit) = &mut self.text else {
             return false;
         };
+        // A disposable projection, not a second document/history authority.
+        // Core owns all text interpretation, grapheme movement and IME filtering.
+        let mut app = rndr_core::App::new();
+        app.add_plugin(rndr_core::Chrome);
+        let entity = app.world_mut().spawn((
+            edit.buffer.clone(),
+            rndr_core::Editor::default(),
+            rndr_core::Label::new(""),
+            rndr_core::Focusable,
+            rndr_core::CapturesKeys,
+        ));
+        let measure = crate::paint::EngineMeasure(self.text_engine.clone());
+        let width = SceneIndex::with_measure(std::slice::from_ref(&edit.node), &measure)
+            .dimensions(&edit.node)
+            .0;
+        if let Some(source) = crate::paint::text_source(&edit.node, width) {
+            app.world_mut().insert(entity, source.style);
+            app.world_mut().insert(
+                entity,
+                rndr_core::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: source.max_width + 2.0 * rndr_core::TEXT_ORIGIN_X,
+                    h: 1.0e7,
+                },
+            );
+            app.world_mut()
+                .insert(entity, rndr_core::Spans { runs: source.spans });
+        }
+        app.world_mut().insert_resource(self.text_engine.clone());
+        app.world_mut().insert_resource(rndr_core::Focus {
+            entity: Some(entity),
+        });
+        app.world_mut().insert_resource(platform);
+        app.world_mut().insert_resource(clipboard.clone());
+        app.world_mut().insert_resource(input);
+        app.update();
+        edit.preview = app
+            .world()
+            .get::<rndr_core::ImePreview>(entity)
+            .cloned()
+            .unwrap_or_default();
+        edit.buffer = app
+            .world_mut()
+            .remove::<rndr_core::Buffer>(entity)
+            .expect("scratch buffer");
+        *clipboard = app
+            .world()
+            .resource::<rndr_core::Clipboard>()
+            .cloned()
+            .unwrap_or_default();
         let Content::Text { text, .. } = &mut edit.node.content else {
             return false;
         };
-        let mut changed = false;
-        for (key, mods) in keys {
-            match key {
-                Key::Backspace => {
-                    changed |= text.pop().is_some();
-                }
-                Key::Enter if !mods.primary => {
-                    text.push('\n');
-                    changed = true;
-                }
-                _ => {}
-            }
-        }
-        let typed: String = typed.chars().filter(|c| !c.is_control()).collect();
-        if !typed.is_empty() {
-            text.push_str(&typed);
-            changed = true;
-        }
+        let next = edit.buffer.text();
+        let changed = *text != next;
         if changed {
-            // Spans may no longer line up with the text.
+            *text = next;
+            // Rich ranges cannot survive arbitrary plain-text replacement unchanged.
             if let Some(layout) = &mut edit.node.text_layout {
-                let length = text.encode_utf16().count() as u32;
-                layout.spans.retain(|s| s.end <= length);
+                layout.spans.clear();
             }
         }
-        changed
+        true
+    }
+
+    fn place_text_caret(&mut self, view: [f32; 2], extend: bool, measure: &dyn TextMeasure) {
+        let Some(edit) = &self.text else {
+            return;
+        };
+        if !edit.preview.text.is_empty() {
+            return;
+        }
+        let nodes = self.nodes();
+        let index = SceneIndex::with_measure(&nodes, measure);
+        let Some(node) = index.get(&edit.id) else {
+            return;
+        };
+        let (width, _) = index.dimensions(node);
+        let Some(source) = crate::paint::text_source(node, width) else {
+            return;
+        };
+        let local = index
+            .world_matrix(node)
+            .inverse()
+            .apply(self.scene_point(view));
+        let layout =
+            self.text_engine
+                .layout(&source.text, &source.style, &source.spans, source.max_width);
+        let byte = layout.index_at(
+            local.x as f32 - source.origin[0],
+            local.y as f32 - source.origin[1],
+        );
+        if let Some(edit) = &mut self.text {
+            edit.buffer.caret = byte;
+            if !extend {
+                edit.buffer.anchor = byte;
+            }
+        }
     }
 
     /// Runs one frame. `measure` must match the painter's.
@@ -830,12 +1053,110 @@ impl CanvasEditor {
         response
     }
 
+    /// Sets the shaping engine used for text input, hit testing and overlays.
+    /// The installed view supplies the world's engine automatically.
+    pub fn set_text_engine(&mut self, engine: Arc<dyn rndr_core::TextEngine>) {
+        self.text_engine = engine;
+    }
+
+    pub(crate) fn handle_native(
+        &mut self,
+        input: &EditorInput,
+        native: &rndr_core::Input,
+        platform: rndr_core::Platform,
+        clipboard: &mut rndr_core::Clipboard,
+        measure: &dyn TextMeasure,
+    ) -> Response {
+        use rndr_core::{Input, LogicalKey, NamedKey};
+        let was_editing = self.text.is_some();
+        if was_editing {
+            let filtered = rndr_core::text_frame(native);
+            let mut pending = Vec::new();
+            for event in filtered.keys.iter().filter(|e| !e.released && !e.synthetic) {
+                let primary = event.modifiers.primary(platform);
+                let finish = event.logical == LogicalKey::Named(NamedKey::Escape)
+                    || (event.logical == LogicalKey::Named(NamedKey::Enter) && primary);
+                let history = primary
+                    && matches!(event.logical, LogicalKey::Character('z' | 'Z' | 'y' | 'Y'));
+                if self.text.is_some()
+                    && (finish || history)
+                    && filtered.preedit.is_empty()
+                    && filtered.commit.is_empty()
+                {
+                    if !pending.is_empty() {
+                        self.text_input(
+                            Input {
+                                keys: std::mem::take(&mut pending),
+                                ..Input::default()
+                            },
+                            platform,
+                            clipboard,
+                        );
+                    }
+                    if history {
+                        if event.modifiers.shift
+                            || matches!(event.logical, LogicalKey::Character('y' | 'Y'))
+                        {
+                            self.redo();
+                        } else {
+                            self.undo();
+                        }
+                    } else {
+                        self.finish_text();
+                    }
+                } else if self.text.is_some() {
+                    pending.push(event.clone());
+                } else if let Some(key) = crate::view::key(&event.logical) {
+                    self.keys(&EditorInput {
+                        keys: vec![(
+                            key,
+                            Modifiers {
+                                primary,
+                                shift: event.modifiers.shift,
+                                alt: event.modifiers.alt,
+                            },
+                        )],
+                        ..EditorInput::default()
+                    });
+                }
+            }
+            if self.text.is_some() {
+                let mut frame = native.clone();
+                frame.pointer = rndr_core::Pointer::default();
+                frame.scroll = [0.0, 0.0];
+                frame.keys = pending;
+                // Queued key text takes precedence over the legacy aggregate.
+                if !native.keys.is_empty() {
+                    frame.chars.clear();
+                } else if !filtered.chars.is_empty() {
+                    frame.keys.push(
+                        rndr_core::KeyEvent::character(' ', rndr_core::Modifiers::new())
+                            .with_text(filtered.chars),
+                    );
+                }
+                self.text_input(frame, platform, clipboard);
+            }
+        }
+        let mut frame = input.clone();
+        if was_editing {
+            frame.keys.clear();
+            frame.text.clear();
+        }
+        self.handle(&frame, measure)
+    }
+
     fn keys(&mut self, input: &EditorInput) -> bool {
         let mut changed = false;
         for &(key, mods) in &input.keys {
             if self.text.is_some() {
                 if key == Key::Escape || (key == Key::Enter && mods.primary) {
                     changed |= self.finish_text() || true;
+                } else if mods.primary && matches!(key, Key::Char('z' | 'y')) {
+                    changed |= if key == Key::Char('y') || mods.shift {
+                        self.redo()
+                    } else {
+                        self.undo()
+                    };
                 }
                 continue;
             }
@@ -1002,6 +1323,17 @@ impl CanvasEditor {
         input: &EditorInput,
         measure: &dyn TextMeasure,
     ) -> bool {
+        if self.text.as_ref().is_some_and(|t| t.dragging) && !pointer.pressed {
+            if pointer.down || pointer.released {
+                self.place_text_caret(pointer.position, true, measure);
+            }
+            if !pointer.down || pointer.released {
+                if let Some(edit) = &mut self.text {
+                    edit.dragging = false;
+                }
+            }
+            return true;
+        }
         let mut changed = false;
         if pointer.pressed {
             changed |= self.press(pointer, input, measure);
@@ -1053,12 +1385,18 @@ impl CanvasEditor {
             let inside = self.text.as_ref().is_some_and(|edit| {
                 let nodes = self.nodes();
                 let index = SceneIndex::with_measure(&nodes, measure);
-                index
-                    .get(&edit.id)
-                    .is_some_and(|n| index.bounds(n).contains(point))
+                index.get(&edit.id).is_some_and(|n| {
+                    let local = index.world_matrix(n).inverse().apply(point);
+                    let (w, h) = index.dimensions(n);
+                    Rect::new(0.0, 0.0, w.max(1.0), h.max(1.0)).contains(local)
+                })
             });
-            if inside {
-                return false;
+            if inside && pointer.button == Button::Primary {
+                self.place_text_caret(pointer.position, mods.shift, measure);
+                if let Some(edit) = &mut self.text {
+                    edit.dragging = true;
+                }
+                return true;
             }
             self.finish_text();
         }
@@ -1125,6 +1463,9 @@ impl CanvasEditor {
                 self.text = Some(TextEdit {
                     id,
                     original: None,
+                    buffer: rndr_core::Buffer::from_str(""),
+                    dragging: false,
+                    preview: rndr_core::ImePreview::default(),
                     node,
                 });
                 self.selection.clear();
@@ -1203,7 +1544,14 @@ impl CanvasEditor {
             }
             if picked.is_some_and(|n| matches!(n.content, Content::Text { .. })) {
                 self.selection = vec![target.clone()];
-                return self.edit_text(&target);
+                if self.edit_text(&target) {
+                    self.place_text_caret(pointer.position, mods.shift, measure);
+                    if let Some(edit) = &mut self.text {
+                        edit.dragging = true;
+                    }
+                    return true;
+                }
+                return false;
             }
         }
         if mods.shift {

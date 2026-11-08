@@ -106,8 +106,24 @@ pub fn paint_overlay(
     }
     if let Some(id) = editor.editing_text() {
         node_outline(canvas, id, px);
+        if let Some(geometry) = editor.text_geometry(measure) {
+            for quad in geometry.selection {
+                let mut color = theme.accent;
+                color.a *= 0.25;
+                canvas.fill(Path::polygon(&quad.map(p)), color, FillRule::NonZero);
+            }
+            canvas.fill(
+                Path::polygon(&geometry.caret.map(p)),
+                theme.accent,
+                FillRule::NonZero,
+            );
+        }
     }
-    let selected = index.selection_roots(editor.selection());
+    let selected = if editor.editing_text().is_some() {
+        Vec::new()
+    } else {
+        index.selection_roots(editor.selection())
+    };
     if selected.len() > 1 {
         for node in &selected {
             node_outline(canvas, &node.id, px);

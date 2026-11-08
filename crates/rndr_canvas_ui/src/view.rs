@@ -7,7 +7,7 @@ use crate::editor::{
 };
 use crate::overlay::{paint_overlay, OverlayTheme};
 use crate::paint::{affine, paint_scene, EngineMeasure, ImageIds};
-use rndr_canvas::text::{EstimateMeasure, TextMeasure};
+use rndr_canvas::text::TextMeasure;
 use rndr_canvas::Vec2;
 use rndr_core::{
     platform_of, Color, CursorStyle, Input, LogicalKey, MotionWatch, NamedKey, PointerButton,
@@ -62,10 +62,7 @@ pub fn install(world: &mut World, view: CanvasView) {
 }
 
 fn measure(world: &World) -> Box<dyn TextMeasure> {
-    match EngineMeasure::from_world(world) {
-        Some(m) => Box::new(m),
-        None => Box::new(EstimateMeasure),
-    }
+    Box::new(EngineMeasure(rndr_core::text_engine(world)))
 }
 
 pub(crate) fn slot_rect(world: &World, slot: u64) -> Option<Rect> {
@@ -76,7 +73,7 @@ pub(crate) fn slot_rect(world: &World, slot: u64) -> Option<Rect> {
         .and_then(|e| world.get::<Rect>(e).copied())
 }
 
-fn key(logical: &LogicalKey) -> Option<Key> {
+pub(crate) fn key(logical: &LogicalKey) -> Option<Key> {
     Some(match logical {
         LogicalKey::Named(NamedKey::Escape) => Key::Escape,
         LogicalKey::Named(NamedKey::Enter) => Key::Enter,
@@ -251,7 +248,10 @@ pub fn take_wheel(world: &mut World) {
     }
 }
 
-/// Feeds this frame's input to the installed [`CanvasView`].
+/// Feeds this frame's input to the installed [`CanvasView`]. Keyboard input is
+/// claimed only while its slot owns focus or receives a press. Run before
+/// host-global shortcuts; Input-front registration gives earliest ownership.
+/// A host toolbar that starts editing should request focus for the slot.
 pub fn update(world: &mut World) {
     let Some(slot) = world.resource::<CanvasView>().map(|v| v.slot) else {
         return;
@@ -261,16 +261,93 @@ pub fn update(world: &mut World) {
     };
     let captured = world.resource::<CanvasView>().is_some_and(|v| v.captured);
     let mut input = editor_input(world, rect, captured);
+    let Some(entity) = world
+        .entities_with::<SurfaceSlot>()
+        .into_iter()
+        .find(|e| world.get::<SurfaceSlot>(*e).is_some_and(|s| s.id == slot))
+    else {
+        return;
+    };
+    world.insert(entity, rndr_core::Focusable);
+    let native = world.resource::<Input>().cloned().unwrap_or_default();
+    let focused = world.resource::<rndr_core::Focus>().and_then(|f| f.entity) == Some(entity);
+    let pressed_here = input.pointer.as_ref().is_some_and(|p| p.pressed);
+    let pressed_elsewhere = native.pointer.pressed && !pressed_here;
+    let owns_keys = (focused || pressed_here) && !pressed_elsewhere;
+    if pressed_here {
+        rndr_core::request_focus(world, entity);
+    }
+    if !owns_keys {
+        input.keys.clear();
+        input.text.clear();
+        if let Some(view) = world.resource_mut::<CanvasView>() {
+            view.editor.finish_text();
+        }
+    }
     let measure = measure(world);
+    let native = if owns_keys { native } else { Input::default() };
+    let platform = platform_of(world);
+    let engine = rndr_core::text_engine(world);
+    let mut clipboard = world
+        .resource::<rndr_core::Clipboard>()
+        .cloned()
+        .unwrap_or_default();
     let Some(view) = world.resource_mut::<CanvasView>() else {
         return;
     };
     let wheel = std::mem::take(&mut view.wheel);
     input.scroll[0] += wheel[0];
     input.scroll[1] += wheel[1];
-    let response = view.editor.handle(&input, measure.as_ref());
+    view.editor.set_text_engine(engine);
+    let response =
+        view.editor
+            .handle_native(&input, &native, platform, &mut clipboard, measure.as_ref());
     if let Some(p) = &input.pointer {
         view.captured = p.down && !p.released;
+    }
+    let editing = view.editor.editing_text().is_some();
+    let candidate = view
+        .editor
+        .text_geometry(measure.as_ref())
+        .and_then(|geometry| {
+            rndr_canvas::Rect::around(geometry.caret.map(|p| view.editor.camera.scene_to_view(p)))
+        });
+    if editing {
+        world.insert(entity, rndr_core::CapturesKeys);
+        if let Some(candidate) = candidate {
+            // This slot has no Label: the layout is solely the native runner's
+            // window-coordinate IME anchor, never another text projection.
+            let mut layout = rndr_core::text_engine(world).layout(
+                "",
+                &rndr_core::TextStyle::default(),
+                &[],
+                f32::INFINITY,
+            );
+            if let Some(line) = layout.lines.first_mut() {
+                line.y = candidate.y as f32 - rndr_core::TEXT_ORIGIN_Y;
+                line.h = candidate.height as f32;
+                line.edges = vec![(0, candidate.x as f32 - rndr_core::TEXT_ORIGIN_X)];
+            }
+            world.insert(entity, layout);
+            world.insert(
+                entity,
+                rndr_core::Caret {
+                    index: 0,
+                    anchor: 0,
+                },
+            );
+        }
+    } else {
+        world.remove::<rndr_core::CapturesKeys>(entity);
+        world.remove::<rndr_core::Caret>(entity);
+        world.remove::<rndr_core::TextLayout>(entity);
+    }
+    world.insert_resource(clipboard);
+    if let Some(native) = world.resource_mut::<Input>().filter(|_| owns_keys) {
+        native.keys.clear();
+        native.key = None;
+        native.chars.clear();
+        native.ime_commit.clear();
     }
     if input.pointer.is_some() {
         world.insert_resource(match response.cursor {
