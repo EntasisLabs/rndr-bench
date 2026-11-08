@@ -9,9 +9,9 @@ pub struct MarkdownSlotId(pub u64);
 /// Failure without partial mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownSlotError {
-    /// View/block has not synced, source is pending, or expected block changed.
+    /// Missing view, invalid block index, pending mount source, or changed expected block.
     StaleBlock,
-    /// ID was used before, or this block already has a host.
+    /// Repeated retained handle/index, reused ID, or this block already has a host.
     Duplicate,
     /// Removed/dead/replaced handle or subtree.
     StaleHandle,
@@ -47,6 +47,10 @@ pub(super) struct Binding {
     end: usize,
     /// When true, [`measure_hosts`] replaces [`Self::height`] from the subtree.
     pub(super) measured: bool,
+}
+pub(super) struct Replacement {
+    source: String,
+    retained: Vec<(MarkdownSlot, usize)>,
 }
 struct HostRoot;
 impl Component for HostRoot {}
@@ -146,6 +150,62 @@ pub fn mount_markdown_slot(
     Ok(MarkdownSlot { view, id, root })
 }
 
+/// Replace markdown while explicitly retaining live host roots at new block indices.
+///
+/// Indices address the blocks parsed from `source`, not the last-synced blocks.
+/// Every handle must belong to `view` and still own its live, attached root.
+/// Repeated handles or indices return [`MarkdownSlotError::Duplicate`]; invalid
+/// indices or a missing view return [`MarkdownSlotError::StaleBlock`]; invalid
+/// handles return [`MarkdownSlotError::StaleHandle`]. Refusal changes nothing.
+///
+/// Source and selection change immediately, as with [`MarkdownView::set_markdown`].
+/// On the next markdown sync, listed roots keep their descendants and focus,
+/// regardless of block content or order. All unlisted hosts retire, including
+/// interaction targets in their attached descendants. Until sync, handle methods
+/// conservatively report pending source. Repeated successful calls before sync
+/// are latest-wins and may retain any still-live binding from the previous sync,
+/// even one omitted by an earlier pending call. An ordinary `set_markdown` cancels
+/// explicit retention; subsequent `push_str` moves these anchors normally.
+pub fn set_markdown_with_slots(
+    world: &mut World,
+    view: Entity,
+    source: &str,
+    retained: &[(MarkdownSlot, usize)],
+) -> Result<(), MarkdownSlotError> {
+    let doc = world
+        .get::<MarkdownView>(view)
+        .ok_or(MarkdownSlotError::StaleBlock)?;
+    let count = parse_range(source, 0, &doc.theme).blocks.len();
+    let mut handles = std::collections::HashSet::new();
+    let mut indices = std::collections::HashSet::new();
+    for &(slot, index) in retained {
+        if slot.view != view
+            || !world.is_alive(slot.root)
+            || !world.has::<HostRoot>(slot.root)
+            || world.get::<crate::Parent>(slot.root).map(|p| p.entity) != Some(view)
+            || !doc.hosts.iter().any(|binding| {
+                binding.id == slot.id && binding.root == slot.root && binding.start != usize::MAX
+            })
+        {
+            return Err(MarkdownSlotError::StaleHandle);
+        }
+        if index >= count {
+            return Err(MarkdownSlotError::StaleBlock);
+        }
+        if !handles.insert(slot.id) || !indices.insert(index) {
+            return Err(MarkdownSlotError::Duplicate);
+        }
+    }
+    let doc = world.get_mut::<MarkdownView>(view).expect("validated view");
+    doc.set_markdown(source);
+    doc.pending_hosts = Some(Replacement {
+        source: source.to_owned(),
+        retained: retained.to_vec(),
+    });
+    doc.hosts_dirty = true;
+    Ok(())
+}
+
 impl MarkdownSlot {
     /// Check whether the retained handle is still mounted. Pending source edits
     /// conservatively make it unavailable until sync has checked the binding.
@@ -189,7 +249,7 @@ impl MarkdownSlot {
             .ok_or(MarkdownSlotError::StaleHandle)?;
         doc.hosts.remove(index);
         doc.hosts_dirty = true;
-        despawn(world, self.root);
+        retire_root(world, self.root);
         Ok(())
     }
 }
@@ -206,6 +266,9 @@ fn valid(world: &World, doc: &MarkdownView, binding: &Binding) -> bool {
 
 /// Move anchors through the edit since the last sync, before the new parse.
 pub(super) fn shift_anchors(doc: &mut MarkdownView) {
+    if doc.pending_hosts.is_some() {
+        return;
+    }
     let (at, removed, inserted) = span_edit(&doc.synced_source, &doc.source);
     for binding in &mut doc.hosts {
         match remap(binding.start, binding.end, at, removed, inserted) {
@@ -220,6 +283,41 @@ pub(super) fn shift_anchors(doc: &mut MarkdownView) {
 
 /// Point each shifted anchor at the block that now owns that source range.
 pub(super) fn rebind(doc: &mut MarkdownView) {
+    if let Some(replacement) = doc.pending_hosts.take() {
+        let appended = (replacement.source != doc.source)
+            .then(|| parse_range(&replacement.source, 0, &doc.theme));
+        let edit = span_edit(&replacement.source, &doc.source);
+        for binding in &mut doc.hosts {
+            let target = replacement
+                .retained
+                .iter()
+                .find(|(slot, _)| slot.id == binding.id && slot.root == binding.root);
+            let Some(&(_, index)) = target else {
+                binding.start = usize::MAX;
+                continue;
+            };
+            if let Some(parsed) = &appended {
+                // Streaming after replacement follows the explicitly chosen
+                // source range through the append, using the usual anchor policy.
+                let range = remap(
+                    parsed.starts[index],
+                    parsed.ends[index],
+                    edit.0,
+                    edit.1,
+                    edit.2,
+                );
+                (binding.start, binding.end) = range.unwrap_or((usize::MAX, usize::MAX));
+            } else {
+                binding.index = index;
+                binding.start = doc.starts[index];
+                binding.end = doc.ends[index];
+                binding.block = doc.blocks[index].clone();
+            }
+        }
+        if appended.is_none() {
+            return;
+        }
+    }
     for binding in &mut doc.hosts {
         if binding.start == usize::MAX {
             continue;
@@ -361,10 +459,24 @@ pub(super) fn retire_stale(world: &mut World, doc: &mut MarkdownView) {
         if valid(world, doc, &binding) {
             keep.push(binding);
         } else {
-            despawn(world, binding.root);
+            retire_root(world, binding.root);
         }
     }
     doc.hosts = keep;
+}
+
+fn retire_root(world: &mut World, root: Entity) {
+    let mut targets = Vec::new();
+    let mut pending = vec![root];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(entity) = pending.pop() {
+        if visited.insert(entity) {
+            targets.push(entity);
+            pending.extend(children_of(world, entity));
+        }
+    }
+    crate::interaction::forget_interaction_targets(world, &targets);
+    despawn(world, root);
 }
 pub(super) fn contains(world: &World, mut entity: Entity) -> bool {
     // Follow arbitrary valid host depth, stopping on malformed hierarchy cycles.
@@ -383,7 +495,67 @@ pub(super) fn contains(world: &World, mut entity: Entity) -> bool {
 
 #[cfg(test)]
 mod shift_tests {
-    use super::{remap, span_edit};
+    use super::*;
+
+    #[test]
+    fn explicit_retirement_forgets_descendant_interaction_targets() {
+        let mut app = App::new();
+        app.add_plugin(MarkdownPlugin);
+        let view = markdown_view(app.world_mut(), "Host");
+        app.update();
+        let block = app.world().get::<MarkdownView>(view).unwrap().blocks()[0].clone();
+        let slot =
+            mount_markdown_slot(app.world_mut(), view, 0, &block, MarkdownSlotId(1)).unwrap();
+        let column = app.world_mut().spawn(Layout::column());
+        set_parent(app.world_mut(), column, slot.root);
+        let child = app
+            .world_mut()
+            .spawn((crate::Button::new("retired"), crate::ReleaseActivation));
+        set_parent(app.world_mut(), child, column);
+        let outside = app
+            .world_mut()
+            .spawn((crate::Button::new("unrelated"), crate::ReleaseActivation));
+        app.update();
+        app.world_mut()
+            .insert_resource(crate::ActionIntents::default());
+        assert_eq!(
+            crate::try_activate(app.world_mut(), child),
+            crate::ActivationResult::Accepted
+        );
+        assert_eq!(
+            crate::try_activate(app.world_mut(), outside),
+            crate::ActivationResult::Accepted
+        );
+        app.world_mut().insert_resource(crate::Focus {
+            entity: Some(child),
+        });
+        app.world_mut().insert_resource(crate::Drag {
+            entity: Some(child),
+            ..Default::default()
+        });
+        app.world_mut().insert_resource(crate::ScrollDrag {
+            entity: Some(column),
+            active: true,
+            ..Default::default()
+        });
+        set_markdown_with_slots(app.world_mut(), view, "Replacement", &[]).unwrap();
+        // Exercise this owner directly, before any generic input cleanup can mask it.
+        sync_one(app.world_mut(), view);
+        assert_eq!(app.world().resource::<crate::Focus>().unwrap().entity, None);
+        assert_eq!(app.world().resource::<crate::Drag>().unwrap().entity, None);
+        let scroll_drag = app.world().resource::<crate::ScrollDrag>().unwrap();
+        assert_eq!(scroll_drag.entity, None);
+        assert!(!scroll_drag.active);
+        let queued = app
+            .world()
+            .resource::<crate::ActionIntents>()
+            .unwrap()
+            .pending();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].entity, outside);
+        assert!(!app.world().is_alive(column));
+        assert!(!app.world().is_alive(child));
+    }
 
     #[test]
     fn insert_above_is_a_prefix_insertion() {

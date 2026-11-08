@@ -16,6 +16,303 @@ fn boot(source: &str, width: f32, height: f32) -> (App, Entity) {
     (app, view)
 }
 
+#[test]
+fn explicit_slots_swap_roots_preserving_children_and_focus() {
+    let (mut app, view) = boot("First\n\nSecond\n\nRemoved", 420.0, 320.0);
+    let slots: Vec<_> = (0..3)
+        .map(|index| {
+            let block = app.world().get::<MarkdownView>(view).unwrap().blocks()[index].clone();
+            rndr_core::mount_markdown_slot(
+                app.world_mut(),
+                view,
+                index,
+                &block,
+                rndr_core::MarkdownSlotId(index as u64),
+            )
+            .unwrap()
+        })
+        .collect();
+    let child = app.world_mut().spawn(Label::new("host state"));
+    rndr_core::set_parent(app.world_mut(), child, slots[0].root);
+    app.update();
+    app.world_mut().insert_resource(rndr_core::Focus {
+        entity: Some(child),
+    });
+
+    rndr_core::set_markdown_with_slots(
+        app.world_mut(),
+        view,
+        "# New second\n\n> New first",
+        &[(slots[0], 1), (slots[1], 0)],
+    )
+    .unwrap();
+    // Replacement is deferred to markdown's existing sync owner.
+    assert!(app.world().is_alive(slots[2].root));
+    assert_eq!(
+        children_of(app.world(), view),
+        slots.iter().map(|s| s.root).collect::<Vec<_>>()
+    );
+    app.update();
+    assert_eq!(
+        children_of(app.world(), view),
+        vec![slots[1].root, slots[0].root]
+    );
+    assert_eq!(children_of(app.world(), slots[0].root), vec![child]);
+    assert_eq!(app.world().get::<Label>(child).unwrap().text, "host state");
+    assert_eq!(
+        app.world().resource::<rndr_core::Focus>().unwrap().entity,
+        Some(child)
+    );
+    assert!(slots[0].is_mounted(app.world()));
+    assert!(slots[1].is_mounted(app.world()));
+    assert!(!app.world().is_alive(slots[2].root));
+    assert_eq!(
+        app.world().get::<MarkdownView>(view).unwrap().blocks()[1].text,
+        "New first"
+    );
+}
+
+fn mounted_slots(app: &mut App, view: Entity) -> Vec<rndr_core::MarkdownSlot> {
+    let blocks = app
+        .world()
+        .get::<MarkdownView>(view)
+        .unwrap()
+        .blocks()
+        .to_vec();
+    let slots = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            rndr_core::mount_markdown_slot(
+                app.world_mut(),
+                view,
+                index,
+                block,
+                rndr_core::MarkdownSlotId(index as u64),
+            )
+            .unwrap()
+        })
+        .collect();
+    app.update();
+    slots
+}
+
+#[test]
+fn explicit_slots_latest_pending_call_wins_even_for_previously_omitted_roots() {
+    let (mut app, view) = boot("A\n\nB\n\nC", 420.0, 320.0);
+    let slots = mounted_slots(&mut app, view);
+    rndr_core::set_markdown_with_slots(app.world_mut(), view, "Interim", &[(slots[0], 0)]).unwrap();
+    rndr_core::set_markdown_with_slots(app.world_mut(), view, "Final", &[(slots[2], 0)]).unwrap();
+    assert!(slots.iter().all(|slot| app.world().is_alive(slot.root)));
+    app.update();
+    // The moved root also appears in the truncated tail of the old positional rows.
+    assert_eq!(children_of(app.world(), view), vec![slots[2].root]);
+    assert!(slots[2].is_mounted(app.world()));
+    assert!(!app.world().is_alive(slots[0].root));
+    assert!(!app.world().is_alive(slots[1].root));
+    assert_eq!(
+        app.world().get::<MarkdownView>(view).unwrap().source(),
+        "Final"
+    );
+}
+
+#[test]
+fn explicit_slots_refusals_are_atomic_and_preserve_pending_replacement() {
+    use rndr_core::{MarkdownSlot, MarkdownSlotError::*};
+    let (mut app, view) = boot("A\n\nB", 420.0, 320.0);
+    let slots = mounted_slots(&mut app, view);
+    let other = rndr_core::markdown_view(app.world_mut(), "Foreign");
+    app.update();
+    let foreign = mounted_slots(&mut app, other)[0];
+    let dead = app.world_mut().spawn(Label::new("dead"));
+    rndr_core::despawn(app.world_mut(), dead);
+    let invalid = [
+        (vec![(slots[0], 0), (slots[0], 1)], Duplicate),
+        (vec![(slots[0], 0), (slots[1], 0)], Duplicate),
+        (vec![(slots[0], 2)], StaleBlock),
+        (vec![(slots[0], usize::MAX)], StaleBlock),
+        (vec![(foreign, 0)], StaleHandle),
+        (
+            vec![(
+                MarkdownSlot {
+                    root: dead,
+                    ..slots[0]
+                },
+                0,
+            )],
+            StaleHandle,
+        ),
+        (
+            vec![(
+                MarkdownSlot {
+                    id: rndr_core::MarkdownSlotId(999),
+                    ..slots[0]
+                },
+                0,
+            )],
+            StaleHandle,
+        ),
+        (
+            vec![(
+                MarkdownSlot {
+                    root: slots[1].root,
+                    ..slots[0]
+                },
+                0,
+            )],
+            StaleHandle,
+        ),
+    ];
+    app.world_mut()
+        .get_mut::<MarkdownView>(view)
+        .unwrap()
+        .select_all();
+    let before = children_of(app.world(), view);
+    for (retained, error) in &invalid {
+        assert_eq!(
+            rndr_core::set_markdown_with_slots(app.world_mut(), view, "X\n\nY", retained),
+            Err(*error)
+        );
+        let doc = app.world().get::<MarkdownView>(view).unwrap();
+        assert_eq!(doc.source(), "A\n\nB");
+        assert_eq!(doc.selected_text(), "A\n\nB");
+        assert_eq!(children_of(app.world(), view), before);
+        assert!(slots.iter().all(|slot| slot.is_mounted(app.world())));
+    }
+    rndr_core::set_markdown_with_slots(app.world_mut(), view, "Accepted", &[(slots[1], 0)])
+        .unwrap();
+    assert_eq!(
+        rndr_core::set_markdown_with_slots(app.world_mut(), view, "Rejected", &[(slots[0], 1)]),
+        Err(StaleBlock)
+    );
+    assert_eq!(
+        app.world().get::<MarkdownView>(view).unwrap().source(),
+        "Accepted"
+    );
+    app.update();
+    assert_eq!(children_of(app.world(), view), vec![slots[1].root]);
+    assert!(slots[1].is_mounted(app.world()));
+    assert_eq!(
+        rndr_core::set_markdown_with_slots(app.world_mut(), dead, "", &[]),
+        Err(StaleBlock)
+    );
+    assert_eq!(
+        rndr_core::set_markdown_with_slots(app.world_mut(), view, "X", &[(slots[0], 0)]),
+        Err(StaleHandle)
+    );
+}
+
+#[test]
+fn explicit_slots_new_ranges_follow_subsequent_default_edits() {
+    let (mut app, view) = boot("Old\n\nBody", 420.0, 320.0);
+    let slots = mounted_slots(&mut app, view);
+    rndr_core::set_markdown_with_slots(app.world_mut(), view, "New\n\nTarget", &[(slots[0], 1)])
+        .unwrap();
+    // Appending before sync should preserve the explicit mapping as an anchor.
+    app.world_mut()
+        .get_mut::<MarkdownView>(view)
+        .unwrap()
+        .push_str("\n\nTail");
+    app.update();
+    assert_eq!(children_of(app.world(), view)[1], slots[0].root);
+    assert!(slots[0].is_mounted(app.world()));
+    app.world_mut()
+        .get_mut::<MarkdownView>(view)
+        .unwrap()
+        .set_markdown("Intro\n\nNew\n\nTarget\n\nTail");
+    app.update();
+    assert_eq!(children_of(app.world(), view)[2], slots[0].root);
+    assert!(slots[0].is_mounted(app.world()));
+}
+
+#[test]
+fn explicit_slots_empty_list_retires_even_unchanged_source() {
+    let (mut app, view) = boot("Same", 420.0, 320.0);
+    let slot = mounted_slots(&mut app, view)[0];
+    rndr_core::set_markdown_with_slots(app.world_mut(), view, "Same", &[]).unwrap();
+    app.update();
+    assert!(!app.world().is_alive(slot.root));
+    assert_eq!(
+        app.world()
+            .get::<Label>(children_of(app.world(), view)[0])
+            .unwrap()
+            .text,
+        "Same"
+    );
+    assert_eq!(
+        rndr_core::mount_markdown_slot(
+            app.world_mut(),
+            view,
+            0,
+            &rndr_core::parse_markdown("Same")[0],
+            slot.id
+        ),
+        Err(rndr_core::MarkdownSlotError::Duplicate)
+    );
+}
+
+#[test]
+fn explicit_slots_all_partial_permutations_survive_reconciliation() {
+    let sources = [
+        "",
+        "# One",
+        "# One\n\n> Two",
+        "# One\n\n> Two\n\n---",
+        "# One\n\n> Two\n\n---\n\nFour",
+    ];
+    for source in sources {
+        let count = rndr_core::parse_markdown(source).len();
+        // None means retire; every other choice is a unique new block index.
+        let choices: Vec<_> = std::iter::once(None).chain((0..count).map(Some)).collect();
+        for &a in &choices {
+            for &b in &choices {
+                for &c in &choices {
+                    let targets = [a, b, c];
+                    let assigned: Vec<_> = targets.iter().flatten().copied().collect();
+                    if assigned
+                        .iter()
+                        .enumerate()
+                        .any(|(i, target)| assigned[..i].contains(target))
+                    {
+                        continue;
+                    }
+                    let (mut app, view) = boot("A\n\nB\n\nC", 420.0, 320.0);
+                    let slots = mounted_slots(&mut app, view);
+                    let children: Vec<_> = slots
+                        .iter()
+                        .map(|slot| {
+                            let child = app.world_mut().spawn(Label::new("retained"));
+                            rndr_core::set_parent(app.world_mut(), child, slot.root);
+                            child
+                        })
+                        .collect();
+                    let retained: Vec<_> = slots
+                        .iter()
+                        .zip(targets)
+                        .filter_map(|(&slot, index)| index.map(|i| (slot, i)))
+                        .collect();
+                    rndr_core::set_markdown_with_slots(app.world_mut(), view, source, &retained)
+                        .unwrap();
+                    app.update();
+                    app.update();
+                    let rows = children_of(app.world(), view);
+                    assert_eq!(rows.len(), count);
+                    for ((slot, child), index) in slots.iter().zip(children).zip(targets) {
+                        if let Some(index) = index {
+                            assert_eq!(rows[index], slot.root, "targets {targets:?}");
+                            assert!(slot.is_mounted(app.world()));
+                            assert_eq!(children_of(app.world(), slot.root), vec![child]);
+                        } else {
+                            assert!(!app.world().is_alive(slot.root));
+                            assert!(!app.world().is_alive(child));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn long_answer() -> String {
     let mut text = String::new();
     for index in 0..24 {

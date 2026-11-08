@@ -67,12 +67,16 @@
 //! reused; source/content changes retire bindings instead of guessing identity.
 //! Core still owns parsing, streaming, layout and clipping. No markdown syntax
 //! executes host code. See the mount/handle docs for ownership and focus rules.
+//! [`set_markdown_with_slots`] explicitly retains chosen roots across a source
+//! replacement or reorder instead of using the default source-range anchors.
 //!
 //! The optional `highlight` feature colors fenced code by token class. Without
 //! it, a code block is one color.
 
 mod host;
-pub use host::{mount_markdown_slot, MarkdownSlot, MarkdownSlotError, MarkdownSlotId};
+pub use host::{
+    mount_markdown_slot, set_markdown_with_slots, MarkdownSlot, MarkdownSlotError, MarkdownSlotId,
+};
 
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
@@ -314,6 +318,7 @@ pub struct MarkdownView {
     parsed_from: usize,
     slots: Vec<Slot>,
     hosts: Vec<host::Binding>,
+    pending_hosts: Option<host::Replacement>,
     /// Source text at the last sync. The next edit is diffed against this
     /// so host anchors follow one inserted, deleted, or replaced span.
     synced_source: String,
@@ -342,6 +347,7 @@ impl MarkdownView {
             parsed_from: 0,
             slots: Vec::new(),
             hosts: Vec::new(),
+            pending_hosts: None,
             synced_source: String::new(),
             used_host_ids: Default::default(),
             hosts_dirty: false,
@@ -382,6 +388,7 @@ impl MarkdownView {
 
     /// Replace the source, clear the selection, and parse from the start.
     pub fn set_markdown(&mut self, source: impl Into<String>) {
+        self.pending_hosts = None;
         self.source = source.into();
         self.commit = 0;
         self.parsed_from = 0;
@@ -727,40 +734,10 @@ fn reconcile(
     while index < doc.blocks.len() {
         let shape = shape_of(&doc.blocks[index], columns);
         let fingerprint = fingerprint(&doc.blocks[index], columns);
-        if doc.slots.get(index).is_some_and(|slot| {
-            doc.hosts
-                .iter()
-                .any(|binding| binding.root == slot.entity && binding.index != index)
-        }) {
-            // The host followed its source range to another block. Keep that
-            // root and build a fresh row for the block that now sits here.
-            let content = block_height(world, base, &doc.blocks[index], width, columns);
-            let outer = content + trail_after(&doc.blocks, index);
-            let entity = spawn_block(
-                world,
-                view,
-                index,
-                &doc.blocks[index],
-                content,
-                outer,
-                &theme,
-                base,
-                columns,
-            );
-            doc.slots[index] = Slot {
-                entity,
-                shape,
-                fingerprint,
-                width_bits: width.to_bits(),
-                index: index as u32,
-            };
-            index += 1;
-            continue;
-        }
         if let Some(binding) = doc.hosts.iter().find(|binding| binding.index == index) {
             let root = binding.root;
             if let Some(old) = doc.slots.get(index) {
-                if old.entity != root {
+                if old.entity != root && !doc.hosts.iter().any(|host| host.root == old.entity) {
                     despawn(world, old.entity);
                 }
             }
@@ -789,6 +766,36 @@ fn reconcile(
             } else {
                 doc.slots[index] = slot;
             }
+            index += 1;
+            continue;
+        }
+        if doc
+            .slots
+            .get(index)
+            .is_some_and(|slot| doc.hosts.iter().any(|binding| binding.root == slot.entity))
+        {
+            // Resolve destination hosts first. A root moving away from this
+            // ordinary row is still owned by its binding, never by its old index.
+            let content = block_height(world, base, &doc.blocks[index], width, columns);
+            let outer = content + trail_after(&doc.blocks, index);
+            let entity = spawn_block(
+                world,
+                view,
+                index,
+                &doc.blocks[index],
+                content,
+                outer,
+                &theme,
+                base,
+                columns,
+            );
+            doc.slots[index] = Slot {
+                entity,
+                shape,
+                fingerprint,
+                width_bits: width.to_bits(),
+                index: index as u32,
+            };
             index += 1;
             continue;
         }
@@ -876,7 +883,10 @@ fn reconcile(
         index += 1;
     }
     while doc.slots.len() > doc.blocks.len() {
-        despawn(world, doc.slots.pop().expect("slot").entity);
+        let root = doc.slots.pop().expect("slot").entity;
+        if !doc.hosts.iter().any(|binding| binding.root == root) {
+            despawn(world, root);
+        }
     }
     // Replacements append in hierarchy order; restore document reading order.
     world.insert(
