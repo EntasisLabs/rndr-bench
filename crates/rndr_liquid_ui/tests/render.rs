@@ -328,3 +328,45 @@ title: Weekly
         "{tip}"
     );
 }
+
+#[test]
+fn append_preserves_control_entities_and_refusal_is_atomic() {
+    let source = "```accordion\ntitle: FAQ\n\n---\nlabel: One\nbody: First body\n```\n\n";
+    let (mut app, view) = setup(source, Recorder::default());
+    let mut before = Vec::new();
+    under(app.world(), view, &mut before);
+    assert_eq!(
+        app.world().get::<LiquidView>(view).unwrap().mounted(),
+        vec![0]
+    );
+    append_liquid_source(
+        app.world_mut(),
+        view,
+        &format!("{source}A streamed paragraph.\n"),
+    )
+    .unwrap();
+    rndr_paint::frame(&mut app);
+    assert!(before.iter().all(|entity| app.world().is_alive(*entity)));
+    let published = app
+        .world()
+        .get::<MarkdownView>(view)
+        .unwrap()
+        .source()
+        .to_owned();
+    assert_eq!(
+        append_liquid_source(app.world_mut(), view, "Replacement"),
+        Err(LiquidAppendError::ChangedPrefix)
+    );
+    assert_eq!(
+        app.world().get::<MarkdownView>(view).unwrap().source(),
+        published
+    );
+    set_liquid_source(app.world_mut(), view, "Replacement");
+    rndr_paint::frame(&mut app);
+    assert!(app
+        .world()
+        .get::<LiquidView>(view)
+        .unwrap()
+        .mounted()
+        .is_empty());
+}

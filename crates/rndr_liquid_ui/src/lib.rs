@@ -37,7 +37,10 @@ mod view;
 
 pub use host::{FeedEntry, LiquidEvent, LiquidHost, LiquidImage, NoHost};
 pub use render::plain;
-pub use view::{dispatch, liquid_view, refresh, set_liquid_source, LiquidView};
+pub use view::{
+    append_liquid_source, dispatch, liquid_view, refresh, set_liquid_source, LiquidAppendError,
+    LiquidView,
+};
 
 use rndr_core::{App, Plugin, Schedule};
 

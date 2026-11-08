@@ -66,6 +66,49 @@ pub fn set_liquid_source(world: &mut World, view: Entity, source: &str) {
     }
 }
 
+/// Append-only update admission result. Refused updates leave the view untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiquidAppendError {
+    /// The entity is not a Liquid Markdown view.
+    MissingView,
+    /// Parsing changed an existing block or the already-published Markdown prefix.
+    /// Keep buffering streaming input and retry, or intentionally reset with
+    /// [`set_liquid_source`]. This API is not keyed reconciliation.
+    ChangedPrefix,
+}
+
+/// Publish an append-only parsed snapshot without rebuilding existing controls.
+///
+/// Pass the complete accumulated source, not just the latest chunk. Existing
+/// parsed blocks and Markdown must be exact prefixes of the new snapshot.
+/// Otherwise admission fails before mutation: callers can keep the last valid
+/// UI while buffering an incomplete fence. Local reader state is uncontrolled;
+/// existing block props cannot be overwritten by this API. Use
+/// [`set_liquid_source`] for an intentional reset. This conservative contract
+/// does not support insertion, reordering, or explicit component identities.
+pub fn append_liquid_source(
+    world: &mut World,
+    view: Entity,
+    source: &str,
+) -> Result<(), LiquidAppendError> {
+    let doc = LiquidDocument::parse(source);
+    let liquid = world
+        .get::<LiquidView>(view)
+        .ok_or(LiquidAppendError::MissingView)?;
+    let md = world
+        .get::<MarkdownView>(view)
+        .ok_or(LiquidAppendError::MissingView)?;
+    if !doc.blocks.starts_with(&liquid.blocks) || !doc.markdown.starts_with(md.source()) {
+        return Err(LiquidAppendError::ChangedPrefix);
+    }
+    world.get_mut::<LiquidView>(view).unwrap().blocks = Arc::new(doc.blocks);
+    world
+        .get_mut::<MarkdownView>(view)
+        .unwrap()
+        .set_markdown(doc.markdown);
+    Ok(())
+}
+
 /// Re-render every mounted block of every Liquid view, asking the host again
 /// for images, feeds and tiles. Block state is kept.
 pub fn refresh(world: &mut World) {
