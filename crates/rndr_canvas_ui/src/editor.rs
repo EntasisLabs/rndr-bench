@@ -249,6 +249,8 @@ struct TextEdit {
     /// The saved node, or `None` for a node created by this edit.
     original: Option<Node>,
     node: Node,
+    caret: usize,
+    anchor: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -770,6 +772,14 @@ impl CanvasEditor {
         self.text = Some(TextEdit {
             id: node.id.clone(),
             original: Some(node.clone()),
+            caret: match &node.content {
+                Content::Text { text, .. } => text.len(),
+                _ => 0,
+            },
+            anchor: match &node.content {
+                Content::Text { text, .. } => text.len(),
+                _ => 0,
+            },
             node,
         });
         true
@@ -782,24 +792,43 @@ impl CanvasEditor {
         let Content::Text { text, .. } = &mut edit.node.content else {
             return false;
         };
-        let mut changed = false;
+        let before = text.clone();
+        let selection = (edit.caret, edit.anchor);
         for (key, mods) in keys {
-            match key {
-                Key::Backspace => {
-                    changed |= text.pop().is_some();
+            if mods.primary {
+                if *key == Key::Char('a') {
+                    edit.anchor = 0;
+                    edit.caret = text.len();
                 }
-                Key::Enter if !mods.primary => {
-                    text.push('\n');
-                    changed = true;
-                }
-                _ => {}
+                continue;
             }
+            let key = match key {
+                Key::Left => Some(rndr_core::Key::Left),
+                Key::Right => Some(rndr_core::Key::Right),
+                Key::Backspace => Some(rndr_core::Key::Backspace),
+                Key::Enter => Some(rndr_core::Key::Enter),
+                Key::Delete => {
+                    if edit.caret == edit.anchor {
+                        (edit.caret, edit.anchor) = rndr_core::edit_string(
+                            text,
+                            edit.caret,
+                            edit.anchor,
+                            Some(rndr_core::Key::Right),
+                            true,
+                            "",
+                            true,
+                        );
+                    }
+                    Some(rndr_core::Key::Backspace)
+                }
+                _ => None,
+            };
+            (edit.caret, edit.anchor) =
+                rndr_core::edit_string(text, edit.caret, edit.anchor, key, mods.shift, "", true);
         }
-        let typed: String = typed.chars().filter(|c| !c.is_control()).collect();
-        if !typed.is_empty() {
-            text.push_str(&typed);
-            changed = true;
-        }
+        (edit.caret, edit.anchor) =
+            rndr_core::edit_string(text, edit.caret, edit.anchor, None, false, typed, true);
+        let changed = *text != before;
         if changed {
             // Spans may no longer line up with the text.
             if let Some(layout) = &mut edit.node.text_layout {
@@ -807,7 +836,12 @@ impl CanvasEditor {
                 layout.spans.retain(|s| s.end <= length);
             }
         }
-        changed
+        changed || selection != (edit.caret, edit.anchor)
+    }
+
+    /// Active text caret and directed selection anchor, in UTF-8 bytes.
+    pub fn text_selection(&self) -> Option<(usize, usize)> {
+        self.text.as_ref().map(|edit| (edit.caret, edit.anchor))
     }
 
     /// Runs one frame. `measure` must match the painter's.
@@ -1126,6 +1160,8 @@ impl CanvasEditor {
                     id,
                     original: None,
                     node,
+                    caret: 0,
+                    anchor: 0,
                 });
                 self.selection.clear();
                 true

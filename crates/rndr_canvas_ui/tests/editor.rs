@@ -351,3 +351,35 @@ fn line_arrow_and_frame_preview_follow_the_drag() {
         assert!(bounds.width >= 199.0, "{tool:?}: {bounds:?}");
     }
 }
+
+#[test]
+fn text_selection_replacement_graphemes_and_transaction_history() {
+    let mut rig = Rig::new();
+    rig.editor.set_tool(Tool::Text);
+    rig.click([50.0, 50.0], NONE);
+    let type_into = |rig: &mut Rig, text: &str| {
+        rig.editor.handle(
+            &EditorInput {
+                text: text.into(),
+                ..EditorInput::default()
+            },
+            &EstimateMeasure,
+        );
+    };
+    type_into(&mut rig, "ab🇫🇷cd");
+    rig.key(Key::Escape, NONE);
+    let id = rig.nodes()[0].id.clone();
+    assert!(rig.editor.edit_text(&id));
+    rig.key(Key::Left, NONE);
+    rig.key(Key::Left, NONE);
+    rig.key(Key::Left, SHIFT);
+    assert_eq!(rig.editor.text_selection(), Some((2, 10)));
+    type_into(&mut rig, "X");
+    rig.key(Key::Delete, NONE);
+    rig.key(Key::Escape, NONE);
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "abXd"));
+    assert!(rig.editor.undo());
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "ab🇫🇷cd"));
+    assert!(rig.editor.redo());
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "abXd"));
+}
