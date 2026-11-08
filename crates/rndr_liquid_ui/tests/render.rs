@@ -333,6 +333,10 @@ title: Weekly
 fn append_preserves_control_entities_and_refusal_is_atomic() {
     let source = "```accordion\ntitle: FAQ\n\n---\nlabel: One\nbody: First body\n```\n\n";
     let (mut app, view) = setup(source, Recorder::default());
+    assert!(press(&mut app, view, "+ One"));
+    assert!(texts(app.world(), view)
+        .iter()
+        .any(|text| text.contains("First body")));
     let mut before = Vec::new();
     under(app.world(), view, &mut before);
     assert_eq!(

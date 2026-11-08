@@ -370,6 +370,7 @@ fn text_selection_replacement_graphemes_and_transaction_history() {
     rig.key(Key::Escape, NONE);
     let id = rig.nodes()[0].id.clone();
     assert!(rig.editor.edit_text(&id));
+    rig.key(Key::Delete, NONE); // Forward delete at end is a consumed no-op.
     rig.key(Key::Left, NONE);
     rig.key(Key::Left, NONE);
     rig.key(Key::Left, SHIFT);

@@ -29,6 +29,7 @@ members = [
     "examples/chart-gallery",
     "examples/liquid-view",
     "examples/canvas-editor",
+    "examples/liquid_canvas_integration",
     "examples/create-view",
     "examples/web",
     "examples/source-session",

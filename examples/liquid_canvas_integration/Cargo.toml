@@ -1,0 +1,16 @@
+[package]
+name = "liquid_canvas_integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Partial Liquid streaming and canvas editing integration fixture"
+publish = false
+
+[dependencies]
+rndr_canvas = { workspace = true }
+rndr_canvas_ui = { workspace = true }
+rndr_core = { workspace = true }
+rndr_paint = { workspace = true }
+rndr_render = { workspace = true }
+rndr_ui = { workspace = true }
+rndr_liquid_ui = { workspace = true }

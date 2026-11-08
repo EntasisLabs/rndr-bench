@@ -808,6 +808,9 @@ impl CanvasEditor {
                 Key::Backspace => Some(rndr_core::Key::Backspace),
                 Key::Enter => Some(rndr_core::Key::Enter),
                 Key::Delete => {
+                    if edit.caret == edit.anchor && edit.caret == text.len() {
+                        continue;
+                    }
                     if edit.caret == edit.anchor {
                         (edit.caret, edit.anchor) = rndr_core::edit_string(
                             text,
