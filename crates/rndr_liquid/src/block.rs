@@ -1,5 +1,7 @@
 //! The fence catalog: language tag to typed block.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::chart::{self, ChartProps};
@@ -9,6 +11,9 @@ use crate::{kanban, parse, slides, styled};
 /// Every fence language Liquid recognizes, including aliases
 /// (`action_row`, `chip_group`, `procedure`).
 pub const FENCE_LANGS: &[&str] = &[
+    "checkbox",
+    "input",
+    "slider",
     "card",
     "carousel",
     "actions",
@@ -46,6 +51,9 @@ pub const FENCE_LANGS: &[&str] = &[
 #[serde(tag = "kind", content = "props", rename_all = "lowercase")]
 #[allow(missing_docs)]
 pub enum LiquidBlock {
+    Checkbox(CheckboxProps),
+    Input(InputProps),
+    Slider(SliderProps),
     Card(CardProps),
     Carousel(CarouselProps),
     Actions(ActionsProps),
@@ -79,6 +87,9 @@ impl LiquidBlock {
     /// Canonical kind name (aliases resolved).
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Checkbox(_) => "checkbox",
+            Self::Input(_) => "input",
+            Self::Slider(_) => "slider",
             Self::Card(_) => "card",
             Self::Carousel(_) => "carousel",
             Self::Actions(_) => "actions",
@@ -110,12 +121,34 @@ impl LiquidBlock {
     }
 }
 
+/// Remove reserved component metadata without changing other body text.
+pub(crate) fn component_metadata(body: &str) -> (Option<String>, Cow<'_, str>) {
+    if !body.starts_with("key:") && !body.contains("\nkey:") {
+        return (None, Cow::Borrowed(body));
+    }
+    let mut id = None;
+    let mut stripped = String::with_capacity(body.len());
+    for line in body.split_inclusive('\n') {
+        if let Some(value) = line.strip_prefix("key:") {
+            let value = value.trim();
+            if id.is_none() && !value.is_empty() {
+                id = Some(value.to_string());
+            }
+        } else {
+            stripped.push_str(line);
+        }
+    }
+    (id, Cow::Owned(stripped))
+}
+
 fn nonempty<T>(items: Vec<T>) -> Option<Vec<T>> {
     (!items.is_empty()).then_some(items)
 }
 
 /// Parses one fence body. `None` means the fence is not valid Liquid and
 /// should render as ordinary fenced code.
+/// Reserved unindented `key:` lines are stripped before parsing. To obtain
+/// those explicit component IDs, use [`crate::LiquidDocument::parse`].
 ///
 /// ```
 /// use rndr_liquid::{parse_fence, LiquidBlock};
@@ -127,7 +160,12 @@ fn nonempty<T>(items: Vec<T>) -> Option<Vec<T>> {
 /// ```
 pub fn parse_fence(lang: &str, body: &str) -> Option<LiquidBlock> {
     use LiquidBlock as B;
+    let (_, stripped) = component_metadata(body);
+    let body = stripped.as_ref();
     Some(match lang.trim().to_lowercase().as_str() {
+        "checkbox" => B::Checkbox(parse::checkbox(body)),
+        "input" => B::Input(parse::input(body)),
+        "slider" => B::Slider(parse::slider(body)?),
         "card" => B::Card(parse::card(body)?),
         "carousel" => B::Carousel(CarouselProps {
             items: nonempty(parse::carousel(body))?,

@@ -2,7 +2,7 @@
 //! shields documentation fences, unwraps mistaken prose fences and
 //! normalizes `{{icon:…}}` shortcodes.
 
-use crate::block::{parse_fence, LiquidBlock, FENCE_LANGS};
+use crate::block::{component_metadata, parse_fence, LiquidBlock, FENCE_LANGS};
 use crate::icons::normalize_icon_id;
 use crate::kv::re;
 
@@ -54,6 +54,10 @@ pub struct LiquidDocument {
     pub markdown: String,
     /// Parsed blocks in creation order (innermost fences first).
     pub blocks: Vec<LiquidBlock>,
+    /// Explicit component keys aligned with [`blocks`](Self::blocks).
+    /// Taken from reserved, unindented `key:` lines; not from domain `id:` fields.
+    /// Duplicate keys are preserved for the host to validate.
+    pub ids: Vec<Option<String>>,
 }
 
 /// A run of Markdown or a block reference.
@@ -66,11 +70,40 @@ pub enum Segment<'a> {
 }
 
 impl LiquidDocument {
+    /// Conservative streaming fence check, independent of prop validity.
+    ///
+    /// Returns false for unclosed backtick fences (including documentation
+    /// fences) or a trailing partial opener ` `` `. Named fences may nest;
+    /// shorter fences inside longer documentation fences remain literal.
+    /// Hosts can retain their last valid UI while buffering the whole candidate.
+    /// [`parse`](Self::parse) itself remains permissive for explicit resets.
+    pub fn is_complete(source: &str) -> bool {
+        let mut stack = Vec::new();
+        for line in source.split('\n') {
+            let line = line.trim_end_matches('\r');
+            if stack.last().is_some_and(|&ticks| fence_close(line, ticks)) {
+                stack.pop();
+                continue;
+            }
+            if let Some((ticks, _)) = fence_open(line) {
+                if stack.last().is_none_or(|&parent| ticks >= parent) {
+                    stack.push(ticks);
+                }
+            }
+        }
+        stack.is_empty() && source.rsplit('\n').next().unwrap_or("").trim_end() != "``"
+    }
+
     /// Preprocesses `source`.
     pub fn parse(source: &str) -> Self {
         let mut blocks = Vec::new();
-        let markdown = preprocess(source, &mut blocks);
-        Self { markdown, blocks }
+        let mut ids = Vec::new();
+        let markdown = preprocess(source, &mut blocks, &mut ids);
+        Self {
+            markdown,
+            blocks,
+            ids,
+        }
     }
 
     /// Block at `index`.
@@ -264,10 +297,22 @@ fn restore_slots(source: &str, slots: &[String]) -> String {
 }
 
 /// Replacement text for one innermost fence, or `None` to keep it.
-fn replace_fence(lang: &str, body: &str, blocks: &mut Vec<LiquidBlock>) -> Option<String> {
+fn replace_fence(
+    lang: &str,
+    body: &str,
+    blocks: &mut Vec<LiquidBlock>,
+    ids: &mut Vec<Option<String>>,
+) -> Option<String> {
     let lang = lang.trim().to_lowercase();
+    let (id, stripped) = if is_liquid_lang(&lang) {
+        component_metadata(body)
+    } else {
+        (None, std::borrow::Cow::Borrowed(body))
+    };
+    let body = stripped.as_ref();
     let mut emit = |block: LiquidBlock| {
         blocks.push(block);
+        ids.push(id.clone());
         Some(format!("\n{}\n", block_token(blocks.len() - 1)))
     };
     if lang == "code" {
@@ -285,7 +330,11 @@ fn replace_fence(lang: &str, body: &str, blocks: &mut Vec<LiquidBlock>) -> Optio
 
 /// One pass over innermost fences (no line inside starts with ```).
 /// Returns the first replacement made, as `(start, end, text)` byte offsets.
-fn first_innermost(text: &str, blocks: &mut Vec<LiquidBlock>) -> Option<(usize, usize, String)> {
+fn first_innermost(
+    text: &str,
+    blocks: &mut Vec<LiquidBlock>,
+    ids: &mut Vec<Option<String>>,
+) -> Option<(usize, usize, String)> {
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
     let line_at = |n: usize| {
@@ -311,7 +360,7 @@ fn first_innermost(text: &str, blocks: &mut Vec<LiquidBlock>) -> Option<(usize, 
         let body_start = starts[n + 1];
         let body_end = starts[close];
         let end = starts[close] + line_at(close).len();
-        if let Some(rep) = replace_fence(&caps[1], &text[body_start..body_end], blocks) {
+        if let Some(rep) = replace_fence(&caps[1], &text[body_start..body_end], blocks, ids) {
             return Some((starts[n], end, rep));
         }
         n = close + 1;
@@ -319,9 +368,13 @@ fn first_innermost(text: &str, blocks: &mut Vec<LiquidBlock>) -> Option<(usize, 
     None
 }
 
-fn process_nested(text: String, blocks: &mut Vec<LiquidBlock>) -> String {
+fn process_nested(
+    text: String,
+    blocks: &mut Vec<LiquidBlock>,
+    ids: &mut Vec<Option<String>>,
+) -> String {
     let mut out = text;
-    while let Some((start, end, rep)) = first_innermost(&out, blocks) {
+    while let Some((start, end, rep)) = first_innermost(&out, blocks, ids) {
         out.replace_range(start..end, &rep);
     }
     out
@@ -387,14 +440,18 @@ fn normalize_icons(source: &str) -> String {
         .join("\n")
 }
 
-fn preprocess(source: &str, blocks: &mut Vec<LiquidBlock>) -> String {
+fn preprocess(
+    source: &str,
+    blocks: &mut Vec<LiquidBlock>,
+    ids: &mut Vec<Option<String>>,
+) -> String {
     let normalized = source.replace("\r\n", "\n");
     let out = SOURCE_WHISPER.replace_all(&normalized, |caps: &regex::Captures| {
         format!("*Source: {}*", caps[1].trim())
     });
     let mut slots = Vec::new();
     let out = shield_documentation_fences(&out, &mut slots);
-    let out = process_nested(out, blocks);
+    let out = process_nested(out, blocks, ids);
     let out = restore_slots(&out, &slots);
     let out = repair_trailing_prose_fence(&out);
     normalize_icons(&out)

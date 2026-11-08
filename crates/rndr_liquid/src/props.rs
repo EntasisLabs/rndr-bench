@@ -19,6 +19,59 @@ macro_rules! props {
     };
 }
 
+/// ` ```slider ` payload. Parsed bounds are finite and strictly increasing;
+/// finite values are clamped to those bounds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SliderProps {
+    /// Visible label (empty by default).
+    pub label: String,
+    /// Initial or host-controlled value (0 by default).
+    pub value: f64,
+    /// Inclusive lower bound (0 by default).
+    pub min: f64,
+    /// Inclusive upper bound (100 by default).
+    pub max: f64,
+    /// Whether host updates replace local state (false by default).
+    pub controlled: bool,
+}
+
+impl Default for SliderProps {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            value: 0.0,
+            min: 0.0,
+            max: 100.0,
+            controlled: false,
+        }
+    }
+}
+
+props!(
+    /// ` ```input ` payload.
+    InputProps {
+        /// Visible label (empty by default).
+        label: String,
+        /// Initial or host-controlled text (empty by default).
+        value: String,
+        /// Whether host updates replace local state (false by default).
+        controlled: bool,
+    }
+);
+
+props!(
+    /// ` ```checkbox ` payload.
+    CheckboxProps {
+        /// Visible label (empty by default).
+        label: String,
+        /// Initial or host-controlled value (false by default).
+        checked: bool,
+        /// Whether host updates replace local state (false by default).
+        controlled: bool,
+    }
+);
+
 props!(
     /// A labeled point on a card face.
     CardPoint {

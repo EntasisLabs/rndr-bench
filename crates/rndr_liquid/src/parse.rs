@@ -14,6 +14,47 @@ use crate::props::*;
 const CALLOUT_TONES: &[&str] = &["note", "warn", "error", "success", "tip", "important"];
 const CHIP_TONES: &[&str] = &["default", "accent", "success", "warn"];
 
+pub(crate) fn slider(body: &str) -> Option<SliderProps> {
+    let fields = parse_kv_block(body);
+    let number = |key: &str, default: f64| -> Option<f64> {
+        let value = match fields.get(key) {
+            Some(raw) => raw.parse::<f64>().ok()?,
+            None => default,
+        };
+        value.is_finite().then_some(value)
+    };
+    let min = number("min", 0.0)?;
+    let max = number("max", 100.0)?;
+    if min >= max {
+        return None;
+    }
+    Some(SliderProps {
+        label: fields.get("label").cloned().unwrap_or_default(),
+        value: number("value", 0.0)?.clamp(min, max),
+        min,
+        max,
+        controlled: crate::kv::bool_loose(fields.get("controlled")).unwrap_or(false),
+    })
+}
+
+pub(crate) fn input(body: &str) -> InputProps {
+    let fields = parse_kv_block(body);
+    InputProps {
+        label: fields.get("label").cloned().unwrap_or_default(),
+        value: fields.get("value").cloned().unwrap_or_default(),
+        controlled: crate::kv::bool_loose(fields.get("controlled")).unwrap_or(false),
+    }
+}
+
+pub(crate) fn checkbox(body: &str) -> CheckboxProps {
+    let fields = parse_kv_block(body);
+    CheckboxProps {
+        label: fields.get("label").cloned().unwrap_or_default(),
+        checked: crate::kv::bool_loose(fields.get("checked")).unwrap_or(false),
+        controlled: crate::kv::bool_loose(fields.get("controlled")).unwrap_or(false),
+    }
+}
+
 pub(crate) fn one_of(raw: Option<&String>, allowed: &[&str]) -> Option<String> {
     let v = raw?.trim().to_lowercase();
     allowed.contains(&v.as_str()).then_some(v)
