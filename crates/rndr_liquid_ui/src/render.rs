@@ -1,12 +1,12 @@
 //! One retained subtree per Liquid block, built from `rndr_ui` parts.
 use crate::chart;
-use crate::view::{nested, with_host, BlockRoot};
+use crate::view::{nested, nested_views, retire, with_host, BlockRoot, Identity};
 use crate::{LiquidEvent, LiquidImage};
 use rndr_core::*;
 use rndr_liquid::*;
 use rndr_ui::controls::{Button, ButtonProps, ButtonVariant, HostIntent, ModeSelector};
 use rndr_ui::{text, Callout, Card, Feedback, Surface, Typography, UiId};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 /// What activating one control inside a block does.
@@ -109,14 +109,31 @@ impl BlockState {
 /// Clear `root` and render its block again from [`BlockRoot`] and
 /// [`BlockState`].
 pub(crate) fn rebuild(world: &mut World, root: Entity) {
-    let Some(BlockRoot { blocks, index }) = world.get::<BlockRoot>(root).cloned() else {
+    let Some(BlockRoot {
+        blocks,
+        index,
+        keys,
+    }) = world.get::<BlockRoot>(root).cloned()
+    else {
         return;
     };
     let Some(block) = blocks.get(index) else {
         return;
     };
+    if crate::control::reconcile(world, root, block) {
+        return;
+    }
+    // Markdown bodies own their retained controls independently of the enclosing
+    // card/report chrome. Park them only during this synchronous rebuild, then
+    // let their own markdown owner reconcile keys into the new body.
+    let bodies = nested_views(world, root);
+    for &body in &bodies {
+        set_parent(world, body, root);
+    }
     for child in children_of(world, root) {
-        despawn(world, child);
+        if !bodies.contains(&child) {
+            retire(world, child);
+        }
     }
     let mut state = world.remove::<BlockState>(root).unwrap_or_default();
     state.init(block);
@@ -126,13 +143,23 @@ pub(crate) fn rebuild(world: &mut World, root: Entity) {
     let mut cx = Cx {
         world,
         blocks: Arc::clone(&blocks),
+        keys,
+        bodies: bodies.into(),
         root,
         actions: Actions::default(),
         state,
         next: 1,
     };
     cx.block(root, block);
-    let Cx { actions, state, .. } = cx;
+    let Cx {
+        actions,
+        state,
+        bodies,
+        ..
+    } = cx;
+    for unused in bodies {
+        retire(world, unused);
+    }
     world.insert(root, actions);
     world.insert(root, state);
 }
@@ -155,6 +182,8 @@ fn filled(s: &Option<String>) -> Option<&str> {
 struct Cx<'w> {
     world: &'w mut World,
     blocks: Arc<Vec<LiquidBlock>>,
+    keys: Vec<Identity>,
+    bodies: VecDeque<Entity>,
     root: Entity,
     actions: Actions,
     state: BlockState,
@@ -255,7 +284,14 @@ impl Cx<'_> {
 
     fn markdown(&mut self, parent: Entity, body: &str) {
         if !body.trim().is_empty() {
-            nested(self.world, parent, &self.blocks, body);
+            nested(
+                self.world,
+                parent,
+                &self.blocks,
+                &self.keys,
+                body,
+                self.bodies.pop_front(),
+            );
         }
     }
 
@@ -313,6 +349,9 @@ impl Cx<'_> {
 
     fn block(&mut self, parent: Entity, block: &LiquidBlock) {
         match block {
+            LiquidBlock::Checkbox(_) | LiquidBlock::Input(_) | LiquidBlock::Slider(_) => {
+                // Form controls reconcile in-place before the rebuilding path.
+            }
             LiquidBlock::Card(p) => self.card_block(parent, p),
             LiquidBlock::Carousel(p) => {
                 let at = self.state.selected.min(p.items.len().saturating_sub(1));

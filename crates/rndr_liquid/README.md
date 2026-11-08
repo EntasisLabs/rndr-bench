@@ -54,7 +54,8 @@ same camelCase property names as the reference TypeScript implementation.
 ## Explicit component identity
 
 Every Liquid fence accepts an unindented, case-sensitive `key: ...` metadata
-line. `key:` is reserved universally, including on controls; **`id:` is not
+line in its leading header, before the first blank line or `---` separator.
+`key:` is reserved in that header, including on controls; **`id:` is not
 component metadata**. Existing domain IDs (feed IDs, styled-block anchors,
 accordion item IDs) retain their original meanings.
 
@@ -68,7 +69,7 @@ controlled: false
 ````
 
 `LiquidDocument::ids: Vec<Option<String>>` is aligned with `blocks`, including
-nested blocks in innermost-first creation order. Reserved `key:` lines are
+nested blocks in innermost-first creation order. Reserved `key:` header lines are
 removed before parsing a block's props, not displayed as body content. Values
 are trimmed but otherwise opaque; the first nonempty key in a fence wins, and
 an empty key means no explicit identity. Duplicate keys across fences are
@@ -76,7 +77,8 @@ preserved, **not made unique**: the host reconciliation layer must reject or
 otherwise handle duplicates rather than silently aliasing state. Invalid
 fences remain literal Markdown, including their metadata. Documentation fences
 remain literal too. `parse_fence` also strips reserved keys but returns only
-props; use `LiquidDocument::parse` to obtain component identity.
+props; use `LiquidDocument::parse` to obtain component identity. Literal `key:`
+lines after the header remain source/body text (for example YAML in `code`).
 
 Adding `ids` requires callers constructing `LiquidDocument` with a struct literal
 to supply that field (or use `..Default::default()`). New `LiquidBlock` variants
@@ -93,7 +95,8 @@ fields, producing public root-exported payloads:
 
 Labels default to empty, checkbox values to false, and input values to empty.
 Slider defaults are `min: 0`, `max: 100`, `value: 0`. Slider parsing refuses
-non-numeric/nonfinite bounds or values, and bounds must satisfy `min < max`.
+non-numeric/nonfinite bounds or values, and bounds must satisfy `min < max`
+with a finite difference, so pointer interpolation cannot overflow.
 Finite out-of-range values (including the default value) are clamped. Refused
 blocks remain ordinary fenced code. These checks apply to fence parsing;
 direct Rust construction and serde decoding do not validate slider ranges.

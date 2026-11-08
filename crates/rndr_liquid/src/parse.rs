@@ -25,7 +25,7 @@ pub(crate) fn slider(body: &str) -> Option<SliderProps> {
     };
     let min = number("min", 0.0)?;
     let max = number("max", 100.0)?;
-    if min >= max {
+    if min >= max || !(max - min).is_finite() {
         return None;
     }
     Some(SliderProps {

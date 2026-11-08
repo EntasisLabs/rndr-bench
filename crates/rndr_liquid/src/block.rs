@@ -121,15 +121,21 @@ impl LiquidBlock {
     }
 }
 
-/// Remove reserved component metadata without changing other body text.
+/// Remove reserved component metadata from the leading header only.
 pub(crate) fn component_metadata(body: &str) -> (Option<String>, Cow<'_, str>) {
     if !body.starts_with("key:") && !body.contains("\nkey:") {
         return (None, Cow::Borrowed(body));
     }
     let mut id = None;
     let mut stripped = String::with_capacity(body.len());
+    let mut in_header = true;
+    let mut started = false;
     for line in body.split_inclusive('\n') {
-        if let Some(value) = line.strip_prefix("key:") {
+        if line.trim() == "---" || (started && line.trim().is_empty()) {
+            in_header = false;
+        }
+        started |= !line.trim().is_empty();
+        if let Some(value) = line.strip_prefix("key:").filter(|_| in_header) {
             let value = value.trim();
             if id.is_none() && !value.is_empty() {
                 id = Some(value.to_string());
@@ -147,7 +153,7 @@ fn nonempty<T>(items: Vec<T>) -> Option<Vec<T>> {
 
 /// Parses one fence body. `None` means the fence is not valid Liquid and
 /// should render as ordinary fenced code.
-/// Reserved unindented `key:` lines are stripped before parsing. To obtain
+/// Reserved unindented `key:` header lines are stripped before parsing. To obtain
 /// those explicit component IDs, use [`crate::LiquidDocument::parse`].
 ///
 /// ```

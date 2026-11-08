@@ -7,6 +7,14 @@ use rndr_core::World;
 /// text; the host decides what, if anything, each one means.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiquidEvent {
+    /// A local form-control draft changed. Hosts may acknowledge it in a later
+    /// source snapshot; this event grants no application mutation authority.
+    ControlChanged {
+        /// Retained block root, not a positional document index.
+        component: rndr_core::Entity,
+        /// Complete proposed local value.
+        value: crate::ControlValue,
+    },
     /// An `actions` button, a recipe action, or any other labelled action.
     Action {
         /// Button label.

@@ -10,6 +10,17 @@ fn single_fence_parser_strips_reserved_keys() {
 }
 
 #[test]
+fn metadata_does_not_remove_literal_key_lines_after_the_header() {
+    let Some(LiquidBlock::Code(code)) = parse_fence(
+        "code",
+        "key: code-id\nlang: yaml\n---\nkey: literal-value\n",
+    ) else {
+        panic!()
+    };
+    assert_eq!(code.source, "key: literal-value");
+}
+
+#[test]
 fn metadata_preserves_domain_ids_and_literal_or_invalid_fences() {
     let source = "```feed\nkey: component\nid: live-data\ndatatype: text\n```\n```block\nkey: styled\nid: anchor\n---\nHello\n```\n```card\nkey: invalid\n```\n````markdown\n```actions\nkey: literal\nApply\n```\n````";
     let doc = rndr_liquid::LiquidDocument::parse(source);
@@ -98,6 +109,7 @@ fn slider_defaults_and_host_values_have_valid_ranges() {
         "value: -inf",
         "value: NaN",
         "value: nope",
+        "min: -1e308\nmax: 1e308",
     ] {
         assert_eq!(parse_fence("slider", body), None, "{body}");
     }

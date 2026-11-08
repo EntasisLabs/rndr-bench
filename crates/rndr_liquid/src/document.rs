@@ -55,7 +55,7 @@ pub struct LiquidDocument {
     /// Parsed blocks in creation order (innermost fences first).
     pub blocks: Vec<LiquidBlock>,
     /// Explicit component keys aligned with [`blocks`](Self::blocks).
-    /// Taken from reserved, unindented `key:` lines; not from domain `id:` fields.
+    /// Taken from reserved, unindented `key:` header lines, not domain `id:` fields.
     /// Duplicate keys are preserved for the host to validate.
     pub ids: Vec<Option<String>>,
 }
