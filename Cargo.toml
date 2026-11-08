@@ -32,6 +32,7 @@ members = [
     "examples/create-view",
     "examples/web",
     "examples/source-session",
+    "examples/liquid_canvas_integration",
 ]
 
 [workspace.package]
