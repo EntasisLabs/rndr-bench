@@ -3,12 +3,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chart::{self, ChartProps};
+use crate::controls::{CheckboxProps, InputProps, SliderProps};
 use crate::props::*;
 use crate::{kanban, parse, slides, styled};
 
 /// Every fence language Liquid recognizes, including aliases
 /// (`action_row`, `chip_group`, `procedure`).
 pub const FENCE_LANGS: &[&str] = &[
+    "checkbox",
+    "input",
+    "slider",
     "card",
     "carousel",
     "actions",
@@ -46,6 +50,9 @@ pub const FENCE_LANGS: &[&str] = &[
 #[serde(tag = "kind", content = "props", rename_all = "lowercase")]
 #[allow(missing_docs)]
 pub enum LiquidBlock {
+    Checkbox(CheckboxProps),
+    Input(InputProps),
+    Slider(SliderProps),
     Card(CardProps),
     Carousel(CarouselProps),
     Actions(ActionsProps),
@@ -79,6 +86,9 @@ impl LiquidBlock {
     /// Canonical kind name (aliases resolved).
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Checkbox(_) => "checkbox",
+            Self::Input(_) => "input",
+            Self::Slider(_) => "slider",
             Self::Card(_) => "card",
             Self::Carousel(_) => "carousel",
             Self::Actions(_) => "actions",
@@ -128,6 +138,9 @@ fn nonempty<T>(items: Vec<T>) -> Option<Vec<T>> {
 pub fn parse_fence(lang: &str, body: &str) -> Option<LiquidBlock> {
     use LiquidBlock as B;
     Some(match lang.trim().to_lowercase().as_str() {
+        "checkbox" => B::Checkbox(crate::controls::checkbox(body)?),
+        "input" => B::Input(crate::controls::input(body)?),
+        "slider" => B::Slider(crate::controls::slider(body)?),
         "card" => B::Card(parse::card(body)?),
         "carousel" => B::Carousel(CarouselProps {
             items: nonempty(parse::carousel(body))?,

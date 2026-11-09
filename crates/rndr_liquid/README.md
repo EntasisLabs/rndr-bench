@@ -26,12 +26,45 @@ for segment in doc.segments() {
 }
 ```
 
+## Host update metadata and controls
+
+`LiquidDocument::parse_with_metadata(source)` returns a `ParsedLiquidDocument`:
+`document` retains the existing `LiquidDocument` representation; `metadata` has
+one `BlockMetadata { explicit_id: Option<String> }` per block in the exact same
+innermost-first order; `incomplete` identifies unfinished Liquid syntax. Hosts
+can keep the last accepted UI while `incomplete` is true. The flag is syntactic:
+a closed fence with invalid props remains ordinary Markdown, not an incomplete
+component. Ambiguous open fences and partial Liquid language names are treated
+conservatively as incomplete. Ordinary backtick and tilde documentation/code
+fences, including nested code examples, do not introduce live controls or IDs.
+
+Use an unindented `id: my-control` line in the fence header, before the first
+`---`. IDs are trimmed, case-sensitive strings; empty IDs are absent. These
+lines are removed before props parsing, except `feed` and styled `block`, where
+`id` already has public domain meaning and remains in props too. Item IDs after
+`---` retain their existing parser semantics. Duplicate block IDs are exposed
+unchanged: the host must reject duplicates globally rather than aliasing state.
+This grammar does not choose fallback identity, reconcile entities, or own focus.
+
+The `checkbox`, `input`, and `slider` fences carry typed `label`, `value`, and
+`controlled` fields. `controlled` defaults to `false`: a renderer should treat
+`value` as initial data for an uncontrolled component and as authoritative data
+for a controlled component. Checkbox values are `true`/`false`; input values are
+strings. Slider values are finite numbers with defaults `min: 0`, `max: 100`,
+`step: 1`, and `value: min`. The parser requires `min < max` and positive `step`,
+rejects invalid/nonfinite numeric input, and clamps the value into the range.
+The renderer owns interaction, step snapping, and controlled/uncontrolled policy.
+
+Existing `LiquidDocument` fields are unchanged. Adding the three `LiquidBlock`
+variants requires downstream exhaustive matches to handle the new controls.
+
 ## Fences
 
 `card` `carousel` `actions` (`action_row`) `callout` `section` `block`
 `chips` (`chip_group`) `media` `feed` `cite` `compare` `plan` `timeline`
 `shortlist` `decision` `brief` `dashboard` `chart` `report` `slides` `tabs`
 `steps` `recipe` (`procedure`) `accordion` `code` `tree` `kanban`
+`checkbox` `input` `slider`
 
 Charts cover `bar`, `line`, `area`, `pie`, `donut`, `radar`, `radial`,
 `scatter`, `combo` and `heatmap`. Inline `{{icon:name}}` shortcodes are

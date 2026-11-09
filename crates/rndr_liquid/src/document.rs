@@ -56,6 +56,30 @@ pub struct LiquidDocument {
     pub blocks: Vec<LiquidBlock>,
 }
 
+/// Identity information for one parsed block.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockMetadata {
+    /// Explicit `id:` field, trimmed and case-sensitive. Empty IDs are absent.
+    /// IDs are reserved, unindented header fields (before the first `---`).
+    /// They are removed before props parsing except legacy `feed` and `block`
+    /// props, where `id` already has public domain meaning and is retained.
+    /// Hosts must reject duplicates across the entire document.
+    pub explicit_id: Option<String>,
+}
+
+/// A parsed document together with reconciliation information.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParsedLiquidDocument {
+    /// The ordinary, backwards-compatible document representation.
+    pub document: LiquidDocument,
+    /// One entry per `document.blocks` element, in the same innermost-first order.
+    pub metadata: Vec<BlockMetadata>,
+    /// An open Liquid fence or possible streamed Liquid opener was detected.
+    /// Hosts may retain the last accepted UI until a complete update arrives.
+    /// Ordinary code/documentation fences are opaque to this check.
+    pub incomplete: bool,
+}
+
 /// A run of Markdown or a block reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Segment<'a> {
@@ -68,9 +92,24 @@ pub enum Segment<'a> {
 impl LiquidDocument {
     /// Preprocesses `source`.
     pub fn parse(source: &str) -> Self {
+        Self::parse_with_metadata(source).document
+    }
+
+    /// Parses source and returns stable explicit identities and streaming status.
+    ///
+    /// Unindented header `id:` lines are reserved metadata, not component content.
+    /// Legacy `feed` and styled `block` retain the field in props as well.
+    /// Metadata includes nested blocks and aligns exactly with `blocks`.
+    /// Completeness is syntactic, not a guarantee that every props payload is valid.
+    pub fn parse_with_metadata(source: &str) -> ParsedLiquidDocument {
         let mut blocks = Vec::new();
-        let markdown = preprocess(source, &mut blocks);
-        Self { markdown, blocks }
+        let mut metadata = Vec::new();
+        let markdown = preprocess(source, &mut blocks, &mut metadata);
+        ParsedLiquidDocument {
+            document: Self { markdown, blocks },
+            metadata,
+            incomplete: has_incomplete_liquid(source),
+        }
     }
 
     /// Block at `index`.
@@ -131,6 +170,73 @@ pub fn looks_like_prose(body: &str) -> bool {
     EMPHASIS.is_match(t)
         || (SENTENCE_END.is_match(t) && len >= 40)
         || (SENTENCE_BREAK.is_match(t) && len > 48)
+}
+
+fn extract_id(body: &str) -> (String, Option<String>) {
+    let mut explicit_id = None;
+    let mut header = true;
+    let kept = body
+        .split('\n')
+        .filter(|line| {
+            if line.trim() == "---" {
+                header = false;
+            }
+            if let Some(value) = line.strip_prefix("id:").filter(|_| header) {
+                if explicit_id.is_none() && !value.trim().is_empty() {
+                    explicit_id = Some(value.trim().to_string());
+                }
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (kept, explicit_id)
+}
+
+fn has_incomplete_liquid(source: &str) -> bool {
+    // Ordinary fences are opaque. Only Liquid containers support nested fences.
+    // Keep delimiter lengths so a documentation fence containing ``` examples
+    // cannot accidentally open a live component or hide an unfinished one.
+    let normalized = source.replace("\r\n", "\n");
+    let shielded = shield_opaque_fences(&normalized, &mut Vec::new());
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    for line in shielded.split('\n') {
+        if let Some(&(ticks, liquid)) = stack.last() {
+            if fence_close(line, ticks) {
+                stack.pop();
+                continue;
+            }
+            if !liquid {
+                continue;
+            }
+        }
+        if let Some((ticks, lang)) = fence_open(line) {
+            let liquid =
+                lang.is_empty() || FENCE_LANGS.iter().any(|known| known.starts_with(&lang));
+            stack.push((ticks, liquid));
+        }
+    }
+    if stack.iter().any(|(_, liquid)| *liquid) {
+        return true;
+    }
+    // Detect a final partial language tag (e.g. ```check) or delimiter, but
+    // never interpret apparent Liquid syntax inside a normal code fence.
+    let tail = shielded
+        .trim_end_matches('\n')
+        .rsplit('\n')
+        .next()
+        .unwrap_or("");
+    if tail == "`" || tail == "``" {
+        return stack.is_empty();
+    }
+    if let Some((_, lang)) = fence_open(tail) {
+        return !lang.is_empty()
+            && stack.len() == 1
+            && FENCE_LANGS.iter().any(|known| known.starts_with(&lang));
+    }
+    false
 }
 
 fn is_liquid_lang(lang: &str) -> bool {
@@ -204,6 +310,75 @@ fn top_level_fences(lines: &[&str]) -> Vec<TopFence> {
     fences
 }
 
+// The legacy documentation pass operates at top level. Shield ordinary code
+// nested inside Liquid as well, and tilde fences (which are never live Liquid).
+// Unfinished ordinary code is opaque through EOF, not an invitation to mount
+// apparent controls from an example being streamed inside it.
+fn shield_opaque_fences(source: &str, slots: &mut Vec<String>) -> String {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let mut out = Vec::new();
+    let mut liquid_stack = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if liquid_stack
+            .last()
+            .is_some_and(|ticks| fence_close(line, *ticks))
+        {
+            liquid_stack.pop();
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        let tilde_ticks = line.chars().take_while(|c| *c == '~').count();
+        let opener = if tilde_ticks >= 3 {
+            Some((tilde_ticks, String::new(), '~'))
+        } else {
+            fence_open(line).map(|(ticks, lang)| (ticks, lang, '`'))
+        };
+        let Some((ticks, lang, marker)) = opener else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+        let potential_liquid = marker == '`'
+            && (lang.is_empty() || FENCE_LANGS.iter().any(|known| known.starts_with(&lang)));
+        if potential_liquid {
+            liquid_stack.push(ticks);
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        let close = (i + 1..lines.len()).find(|&j| {
+            let n = lines[j].chars().take_while(|c| *c == marker).count();
+            n >= ticks && lines[j][n..].trim().is_empty()
+        });
+        let end = close.map_or(lines.len(), |j| j + 1);
+        let nested = !liquid_stack.is_empty();
+        let body = lines[i + 1..close.unwrap_or(lines.len())].join("\n");
+        if marker == '~' || nested || close.is_none() || BODY_HAS_OPENER.is_match(&body) {
+            // Keep legacy trailing-prose repair for plain prose, but not for
+            // a fenced code example containing apparent Liquid openers.
+            let repairable = close.is_none()
+                && !nested
+                && marker == '`'
+                && !BODY_HAS_OPENER.is_match(&body)
+                && (PROSE_MISTAKEN_LANGS.contains(&lang.as_str()) || looks_like_prose(&body));
+            if !repairable {
+                let token = format!("{DOC_SLOT}{}{DOC_SLOT}", slots.len());
+                slots.push(lines[i..end].join("\n"));
+                out.push(token);
+                i = end;
+                continue;
+            }
+        }
+        // Complete top-level ordinary fences retain legacy prose heuristics.
+        out.extend(lines[i..end].iter().map(|line| line.to_string()));
+        i = end;
+    }
+    out.join("\n")
+}
+
 fn shield_documentation_fences(source: &str, slots: &mut Vec<String>) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
     let fences = top_level_fences(&lines);
@@ -264,10 +439,29 @@ fn restore_slots(source: &str, slots: &[String]) -> String {
 }
 
 /// Replacement text for one innermost fence, or `None` to keep it.
-fn replace_fence(lang: &str, body: &str, blocks: &mut Vec<LiquidBlock>) -> Option<String> {
+fn replace_fence(
+    lang: &str,
+    body: &str,
+    blocks: &mut Vec<LiquidBlock>,
+    metadata: &mut Vec<BlockMetadata>,
+    slots: &[String],
+) -> Option<String> {
     let lang = lang.trim().to_lowercase();
+    let (without_id, explicit_id) = extract_id(body);
+    // These legacy props already assign meaning to id. Preserve that public
+    // contract while also exposing it as block identity metadata.
+    let body = if lang == "feed" || lang == "block" {
+        body
+    } else {
+        without_id.as_str()
+    };
+    let restored = restore_slots(body, slots);
+    let body = restored.as_str();
     let mut emit = |block: LiquidBlock| {
         blocks.push(block);
+        metadata.push(BlockMetadata {
+            explicit_id: explicit_id.clone(),
+        });
         Some(format!("\n{}\n", block_token(blocks.len() - 1)))
     };
     if lang == "code" {
@@ -285,7 +479,12 @@ fn replace_fence(lang: &str, body: &str, blocks: &mut Vec<LiquidBlock>) -> Optio
 
 /// One pass over innermost fences (no line inside starts with ```).
 /// Returns the first replacement made, as `(start, end, text)` byte offsets.
-fn first_innermost(text: &str, blocks: &mut Vec<LiquidBlock>) -> Option<(usize, usize, String)> {
+fn first_innermost(
+    text: &str,
+    blocks: &mut Vec<LiquidBlock>,
+    metadata: &mut Vec<BlockMetadata>,
+    slots: &[String],
+) -> Option<(usize, usize, String)> {
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
     let line_at = |n: usize| {
@@ -311,7 +510,13 @@ fn first_innermost(text: &str, blocks: &mut Vec<LiquidBlock>) -> Option<(usize, 
         let body_start = starts[n + 1];
         let body_end = starts[close];
         let end = starts[close] + line_at(close).len();
-        if let Some(rep) = replace_fence(&caps[1], &text[body_start..body_end], blocks) {
+        if let Some(rep) = replace_fence(
+            &caps[1],
+            &text[body_start..body_end],
+            blocks,
+            metadata,
+            slots,
+        ) {
             return Some((starts[n], end, rep));
         }
         n = close + 1;
@@ -319,9 +524,14 @@ fn first_innermost(text: &str, blocks: &mut Vec<LiquidBlock>) -> Option<(usize, 
     None
 }
 
-fn process_nested(text: String, blocks: &mut Vec<LiquidBlock>) -> String {
+fn process_nested(
+    text: String,
+    blocks: &mut Vec<LiquidBlock>,
+    metadata: &mut Vec<BlockMetadata>,
+    slots: &[String],
+) -> String {
     let mut out = text;
-    while let Some((start, end, rep)) = first_innermost(&out, blocks) {
+    while let Some((start, end, rep)) = first_innermost(&out, blocks, metadata, slots) {
         out.replace_range(start..end, &rep);
     }
     out
@@ -387,14 +597,19 @@ fn normalize_icons(source: &str) -> String {
         .join("\n")
 }
 
-fn preprocess(source: &str, blocks: &mut Vec<LiquidBlock>) -> String {
+fn preprocess(
+    source: &str,
+    blocks: &mut Vec<LiquidBlock>,
+    metadata: &mut Vec<BlockMetadata>,
+) -> String {
     let normalized = source.replace("\r\n", "\n");
     let out = SOURCE_WHISPER.replace_all(&normalized, |caps: &regex::Captures| {
         format!("*Source: {}*", caps[1].trim())
     });
     let mut slots = Vec::new();
+    let out = shield_opaque_fences(&out, &mut slots);
     let out = shield_documentation_fences(&out, &mut slots);
-    let out = process_nested(out, blocks);
+    let out = process_nested(out, blocks, metadata, &slots);
     let out = restore_slots(&out, &slots);
     let out = repair_trailing_prose_fence(&out);
     normalize_icons(&out)

@@ -31,13 +31,18 @@
 #![warn(missing_docs)]
 
 mod chart;
+mod controls;
 mod host;
 mod render;
 mod view;
 
+pub use controls::{control_value, LiquidControlChanged, LiquidValue};
 pub use host::{FeedEntry, LiquidEvent, LiquidHost, LiquidImage, NoHost};
 pub use render::plain;
-pub use view::{dispatch, liquid_view, refresh, set_liquid_source, LiquidView};
+pub use view::{
+    dispatch, liquid_view, refresh, set_liquid_source, update_liquid_source, LiquidUpdateError,
+    LiquidView, UpdateStatus,
+};
 
 use rndr_core::{App, Plugin, Schedule};
 
@@ -64,6 +69,7 @@ impl Plugin for LiquidUiPlugin {
         app.world_mut()
             .insert_resource(view::HostSlot(Some(self.host)));
         app.add_system(Schedule::Update, chart::hover);
+        app.add_system(Schedule::Update, controls::pointer);
         app.add_system(Schedule::PostUpdate, view::reconcile);
     }
 }

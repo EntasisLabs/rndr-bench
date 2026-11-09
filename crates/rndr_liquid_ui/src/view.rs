@@ -13,14 +13,34 @@ use std::sync::Arc;
 pub struct LiquidView {
     blocks: Arc<Vec<LiquidBlock>>,
     mounted: Vec<Mounted>,
+    ids: Vec<Option<String>>,
     next_id: u64,
 }
 
 impl Component for LiquidView {}
 
 struct Mounted {
-    slot: MarkdownSlot,
+    slot: Option<MarkdownSlot>,
+    content: Entity,
     block: usize,
+}
+
+/// Outcome of an incremental source submission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// Accepted; retained subtrees are attached after the next markdown sync.
+    Applied,
+    /// An unfinished fence was detected. The entire last valid UI is kept.
+    Deferred,
+}
+
+/// An update was refused without changing the view or its interactive state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiquidUpdateError {
+    /// The entity does not own both a Liquid and Markdown view.
+    MissingView,
+    /// Explicit IDs must be unique throughout a document, including nested blocks.
+    DuplicateId(String),
 }
 
 /// Root of one rendered block: which block it shows and the view it is in.
@@ -40,45 +60,253 @@ impl LiquidView {
 
     /// Indices into [`Self::blocks`] that are mounted right now, in reading order.
     pub fn mounted(&self) -> Vec<usize> {
-        self.mounted.iter().map(|m| m.block).collect()
+        self.mounted
+            .iter()
+            .filter(|m| m.slot.is_some())
+            .map(|m| m.block)
+            .collect()
     }
 }
 
 /// Spawn a scrolling markdown view of Liquid `source`. Parent it like any
 /// [`markdown_view`].
 pub fn liquid_view(world: &mut World, source: &str) -> Entity {
-    let doc = LiquidDocument::parse(source);
+    let parsed = LiquidDocument::parse_with_metadata(source);
+    let doc = parsed.document;
     let view = markdown_view(world, doc.markdown);
-    world.insert(view, LiquidView::new(Arc::new(doc.blocks)));
+    let mut liquid = LiquidView::new(Arc::new(doc.blocks));
+    liquid.ids = parsed
+        .metadata
+        .into_iter()
+        .map(|meta| meta.explicit_id)
+        .collect();
+    world.insert(view, liquid);
     view
 }
 
 /// Replace the whole source of a Liquid view. Every mounted block is rebuilt
 /// on the next frame; block state such as the open tab is reset.
 pub fn set_liquid_source(world: &mut World, view: Entity, source: &str) {
-    let doc = LiquidDocument::parse(source);
+    let parsed = LiquidDocument::parse_with_metadata(source);
+    let doc = parsed.document;
     detach_all(world, view);
     if let Some(liquid) = world.get_mut::<LiquidView>(view) {
         liquid.blocks = Arc::new(doc.blocks);
+        liquid.ids = parsed
+            .metadata
+            .into_iter()
+            .map(|meta| meta.explicit_id)
+            .collect();
     }
     if let Some(md) = world.get_mut::<MarkdownView>(view) {
         md.set_markdown(doc.markdown);
     }
 }
 
+/// Incrementally replace source without replacing logically unchanged controls.
+///
+/// `id:` in a fence is document-scoped identity. Matching IDs with the same
+/// component kind retain their subtree, even after reordering. Anonymous blocks
+/// match by kind and ordinal *among anonymous blocks of that kind*: Markdown
+/// insertions are safe, but inserting/reordering same-kind anonymous controls
+/// cannot establish logical identity. Use explicit IDs for dynamic collections.
+/// Duplicate IDs refuse the entire update. An incomplete fence defers the entire
+/// update, including Markdown; resubmit the complete source when more arrives.
+///
+/// Input controls are uncontrolled by default: `value` initializes local state
+/// only. `controlled: true` reapplies host `value` on every accepted submission.
+/// User edits remain visible between submissions. Kind changes and removal retire
+/// the old subtree and its component-owned resources. Use [`set_liquid_source`]
+/// for intentional reset. Submission and the next app frame form one UI update;
+/// do not mutate the underlying MarkdownView independently.
+pub fn update_liquid_source(
+    world: &mut World,
+    view: Entity,
+    source: &str,
+) -> Result<UpdateStatus, LiquidUpdateError> {
+    if !world.has::<LiquidView>(view) || !world.has::<MarkdownView>(view) {
+        return Err(LiquidUpdateError::MissingView);
+    }
+    let parsed = LiquidDocument::parse_with_metadata(source);
+    let ids: Vec<_> = parsed
+        .metadata
+        .into_iter()
+        .map(|meta| meta.explicit_id)
+        .collect();
+    if parsed.incomplete {
+        return Ok(UpdateStatus::Deferred);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in ids.iter().flatten() {
+        if !seen.insert(id) {
+            return Err(LiquidUpdateError::DuplicateId(id.clone()));
+        }
+    }
+    let mut liquid = world.remove::<LiquidView>(view).expect("validated");
+    let new_blocks = Arc::new(parsed.document.blocks);
+    let old_keys = identities(&liquid.blocks, &liquid.ids);
+    let new_keys = identities(&new_blocks, &ids);
+    let candidates = park_content(world, view, &mut liquid, &new_blocks);
+    let mut retained = Vec::new();
+    for mut mounted in candidates {
+        let next = new_keys
+            .iter()
+            .position(|key| old_keys.get(mounted.block) == Some(key));
+        if let Some(next) = next.filter(|&next| {
+            liquid.blocks[mounted.block].kind() == new_blocks[next].kind()
+                && world.is_alive(mounted.content)
+        }) {
+            let changed = liquid.blocks[mounted.block] != new_blocks[next];
+            world.insert(
+                mounted.content,
+                BlockRoot {
+                    blocks: Arc::clone(&new_blocks),
+                    index: next,
+                },
+            );
+            if !crate::controls::update(world, mounted.content, &new_blocks[next]) && changed {
+                render::rebuild(world, mounted.content);
+            }
+            mounted.block = next;
+            retained.push(mounted);
+        } else {
+            retire(world, mounted);
+        }
+    }
+    liquid.blocks = new_blocks;
+    liquid.ids = ids;
+    liquid.mounted = retained;
+    world.insert(view, liquid);
+    world
+        .get_mut::<MarkdownView>(view)
+        .expect("validated")
+        .set_markdown(parsed.document.markdown);
+    Ok(UpdateStatus::Applied)
+}
+
+fn identities(blocks: &[LiquidBlock], ids: &[Option<String>]) -> Vec<String> {
+    let mut ordinals = std::collections::HashMap::new();
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            if let Some(id) = ids.get(index).and_then(|id| id.as_ref()) {
+                return format!("id:{id}");
+            }
+            let ordinal = ordinals.entry(block.kind()).or_insert(0usize);
+            let key = format!("anonymous:{}:{}", block.kind(), ordinal);
+            *ordinal += 1;
+            key
+        })
+        .collect()
+}
+
 /// Re-render every mounted block of every Liquid view, asking the host again
 /// for images, feeds and tiles. Block state is kept.
 pub fn refresh(world: &mut World) {
-    for root in world.entities_with::<BlockRoot>() {
-        render::rebuild(world, root);
+    let owners: Vec<_> = world
+        .entities_with::<LiquidView>()
+        .into_iter()
+        .filter(|view| {
+            let blocks = &world.get::<LiquidView>(*view).expect("listed").blocks;
+            let mut parent = world.get::<Parent>(*view).map(|parent| parent.entity);
+            while let Some(ancestor) = parent {
+                if world
+                    .get::<LiquidView>(ancestor)
+                    .is_some_and(|owner| Arc::ptr_eq(blocks, &owner.blocks))
+                {
+                    return false;
+                }
+                parent = world.get::<Parent>(ancestor).map(|parent| parent.entity);
+            }
+            true
+        })
+        .collect();
+    for view in owners {
+        let Some(mut liquid) = world.remove::<LiquidView>(view) else {
+            continue;
+        };
+        let blocks = Arc::clone(&liquid.blocks);
+        let candidates = park_content(world, view, &mut liquid, &blocks);
+        for mounted in &candidates {
+            render::rebuild(world, mounted.content);
+        }
+        liquid.mounted = candidates;
+        world.insert(view, liquid);
     }
 }
 
+// Source updates and host refresh share the same retirement boundary. Park all
+// component content before rebuilding an ancestor; slot roots stay core-owned.
+fn park_content(
+    world: &mut World,
+    view: Entity,
+    liquid: &mut LiquidView,
+    next: &Arc<Vec<LiquidBlock>>,
+) -> Vec<Mounted> {
+    let mut candidates = std::mem::take(&mut liquid.mounted);
+    fn nested_views(world: &World, parent: Entity, out: &mut Vec<Entity>) {
+        for child in children_of(world, parent) {
+            if world.has::<LiquidView>(child) {
+                out.push(child);
+            }
+            nested_views(world, child, out);
+        }
+    }
+    let mut descendants = Vec::new();
+    nested_views(world, view, &mut descendants);
+    for nested in descendants {
+        if let Some(child) = world.get_mut::<LiquidView>(nested) {
+            if Arc::ptr_eq(&child.blocks, &liquid.blocks) {
+                candidates.append(&mut child.mounted);
+                child.blocks = Arc::clone(next);
+            }
+        }
+    }
+    for mounted in &mut candidates {
+        set_parent(world, mounted.content, view);
+        if let Some(slot) = mounted.slot.take() {
+            let _ = slot.detach(world);
+        }
+    }
+    candidates
+}
+
 impl LiquidView {
+    /// Resolve an explicit fence ID to its live block content root.
+    pub fn block(&self, id: &str) -> Option<Entity> {
+        let index = self
+            .ids
+            .iter()
+            .position(|value| value.as_deref() == Some(id))?;
+        self.mounted
+            .iter()
+            .find(|mounted| mounted.block == index)
+            .map(|mounted| mounted.content)
+    }
+
+    /// Resolve an explicit ID to its canonical interactive control root.
+    pub fn control(&self, world: &World, id: &str) -> Option<Entity> {
+        let index = self
+            .ids
+            .iter()
+            .position(|value| value.as_deref() == Some(id))?;
+        let root = world
+            .entities_with::<BlockRoot>()
+            .into_iter()
+            .find(|root| {
+                world.get::<BlockRoot>(*root).is_some_and(|block| {
+                    block.index == index && Arc::ptr_eq(&self.blocks, &block.blocks)
+                })
+            })?;
+        crate::controls::editor(world, root)
+    }
+
     fn new(blocks: Arc<Vec<LiquidBlock>>) -> Self {
         Self {
             blocks,
             mounted: Vec::new(),
+            ids: Vec::new(),
             next_id: 1,
         }
     }
@@ -90,7 +318,23 @@ fn detach_all(world: &mut World, view: Entity) {
     };
     let mounted = std::mem::take(&mut liquid.mounted);
     for m in mounted {
-        let _ = m.slot.detach(world);
+        retire(world, m);
+    }
+}
+
+fn retire(world: &mut World, mounted: Mounted) {
+    fn collect(world: &World, root: Entity, all: &mut Vec<Entity>) {
+        all.push(root);
+        for child in children_of(world, root) {
+            collect(world, child, all);
+        }
+    }
+    let mut all = Vec::new();
+    collect(world, mounted.content, &mut all);
+    forget_interaction_targets(world, &all);
+    despawn(world, mounted.content);
+    if let Some(slot) = mounted.slot {
+        let _ = slot.detach(world);
     }
 }
 
@@ -136,7 +380,7 @@ pub(crate) fn reconcile(world: &mut World) {
         };
         let blocks: Vec<MarkdownBlock> = md.blocks().to_vec();
         let mut liquid = world.remove::<LiquidView>(view).expect("listed");
-        liquid.mounted.retain(|m| m.slot.is_mounted(world));
+        liquid.mounted.retain(|m| world.is_alive(m.content));
         for (index, block) in blocks.iter().enumerate() {
             let Some(target) = token_of(block) else {
                 continue;
@@ -144,7 +388,11 @@ pub(crate) fn reconcile(world: &mut World) {
             if target >= liquid.blocks.len() {
                 continue;
             }
-            if liquid.mounted.iter().any(|m| m.block == target) {
+            if liquid
+                .mounted
+                .iter()
+                .any(|m| m.block == target && m.slot.is_some_and(|slot| slot.is_mounted(world)))
+            {
                 continue;
             }
             let id = MarkdownSlotId(liquid.next_id);
@@ -152,26 +400,67 @@ pub(crate) fn reconcile(world: &mut World) {
                 continue;
             };
             liquid.next_id += 1;
-            world.insert(
-                slot.root,
-                BlockRoot {
-                    blocks: Arc::clone(&liquid.blocks),
-                    index: target,
-                },
-            );
-            render::rebuild(world, slot.root);
-            liquid.mounted.push(Mounted {
-                slot,
-                block: target,
-            });
+            if let Some(mounted) = liquid.mounted.iter_mut().find(|m| m.block == target) {
+                set_parent(world, mounted.content, slot.root);
+                mounted.slot = Some(slot);
+            } else if let Some(mut retained) = claim_ancestor(world, view, target, &liquid.blocks) {
+                set_parent(world, retained.content, slot.root);
+                retained.slot = Some(slot);
+                liquid.mounted.push(retained);
+            } else {
+                let content = world.spawn((Layout {
+                    width: Size::Fill,
+                    height: Size::Hug,
+                    ..Layout::column()
+                },));
+                set_parent(world, content, slot.root);
+                world.insert(
+                    content,
+                    BlockRoot {
+                        blocks: Arc::clone(&liquid.blocks),
+                        index: target,
+                    },
+                );
+                render::rebuild(world, content);
+                liquid.mounted.push(Mounted {
+                    slot: Some(slot),
+                    content,
+                    block: target,
+                });
+            }
         }
         liquid.mounted.sort_by_key(|m| {
             world
-                .get::<Rect>(m.slot.root)
+                .get::<Rect>(m.content)
                 .map(|r| r.y as i64)
                 .unwrap_or(0)
         });
         world.insert(view, liquid);
+    }
+}
+
+// Claim only a parked subtree from the same document; nested views never get
+// permission to take mounted content from another slot or another document.
+fn claim_ancestor(
+    world: &mut World,
+    view: Entity,
+    target: usize,
+    blocks: &Arc<Vec<LiquidBlock>>,
+) -> Option<Mounted> {
+    let mut parent = world.get::<Parent>(view)?.entity;
+    loop {
+        if let Some(owner) = world.get_mut::<LiquidView>(parent) {
+            if Arc::ptr_eq(&owner.blocks, blocks) {
+                if let Some(at) = owner
+                    .mounted
+                    .iter()
+                    .position(|m| m.block == target && m.slot.is_none())
+                {
+                    return Some(owner.mounted.remove(at));
+                }
+            }
+        }
+        parent = world.get::<Parent>(parent)?.entity;
     }
 }
 

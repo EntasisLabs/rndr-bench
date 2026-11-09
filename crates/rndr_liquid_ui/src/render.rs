@@ -62,6 +62,19 @@ impl BlockState {
 
     fn init(&mut self, block: &LiquidBlock) {
         if self.ready {
+            match block {
+                LiquidBlock::Carousel(props) => self.len = props.items.len(),
+                LiquidBlock::Slides(props) => self.len = props.slides.len(),
+                LiquidBlock::Accordion(props) => {
+                    self.single = !props.multiple.unwrap_or(false);
+                    self.open.retain(|index| *index < props.items.len());
+                    if self.single && self.open.len() > 1 {
+                        self.open = self.open.iter().next().copied().into_iter().collect();
+                    }
+                }
+                _ => {}
+            }
+            self.selected = self.selected.min(self.len.saturating_sub(1));
             return;
         }
         self.ready = true;
@@ -115,8 +128,14 @@ pub(crate) fn rebuild(world: &mut World, root: Entity) {
     let Some(block) = blocks.get(index) else {
         return;
     };
+    if crate::controls::update(world, root, block) {
+        return;
+    }
     for child in children_of(world, root) {
         despawn(world, child);
+    }
+    if crate::controls::mount(world, root, block) {
+        return;
     }
     let mut state = world.remove::<BlockState>(root).unwrap_or_default();
     state.init(block);
@@ -313,6 +332,9 @@ impl Cx<'_> {
 
     fn block(&mut self, parent: Entity, block: &LiquidBlock) {
         match block {
+            LiquidBlock::Checkbox(_) | LiquidBlock::Input(_) | LiquidBlock::Slider(_) => {
+                crate::controls::mount(self.world, parent, block);
+            }
             LiquidBlock::Card(p) => self.card_block(parent, p),
             LiquidBlock::Carousel(p) => {
                 let at = self.state.selected.min(p.items.len().saturating_sub(1));

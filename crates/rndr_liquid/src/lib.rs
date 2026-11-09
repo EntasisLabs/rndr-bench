@@ -33,6 +33,7 @@
 
 mod block;
 pub mod chart;
+mod controls;
 mod document;
 mod icons;
 mod kanban;
@@ -43,8 +44,10 @@ mod slides;
 mod styled;
 
 pub use block::{parse_fence, LiquidBlock, FENCE_LANGS};
+pub use controls::{CheckboxProps, InputProps, SliderProps};
 pub use document::{
-    block_token, looks_like_prose, segments, LiquidDocument, Segment, BLOCK_TOKEN_DELIMITER,
+    block_token, looks_like_prose, segments, BlockMetadata, LiquidDocument, ParsedLiquidDocument,
+    Segment, BLOCK_TOKEN_DELIMITER,
 };
 pub use icons::{normalize_icon_id, split_icons, InlineIcon, ICON_ALLOWLIST};
 pub use props::*;
