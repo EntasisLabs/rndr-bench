@@ -141,6 +141,8 @@ pub enum Key {
     Right,
     Up,
     Down,
+    Home,
+    End,
     /// A letter or symbol, lowercase, for shortcuts.
     Char(char),
 }
@@ -244,11 +246,15 @@ pub struct Response {
 }
 
 #[derive(Debug, Clone)]
-struct TextEdit {
-    id: String,
+pub(crate) struct TextEdit {
+    pub(crate) id: String,
     /// The saved node, or `None` for a node created by this edit.
     original: Option<Node>,
-    node: Node,
+    pub(crate) node: Node,
+    pub(crate) caret: usize,
+    pub(crate) anchor: usize,
+    pub(crate) dragging: bool,
+    pub(crate) preedit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -308,7 +314,8 @@ pub struct CanvasEditor {
     pub style: Style,
     pub snapping: Snapping,
     gesture: Gesture,
-    text: Option<TextEdit>,
+    pub(crate) text: Option<TextEdit>,
+    pub(crate) text_engine: Arc<dyn rndr_core::TextEngine>,
     overlay: Overlay,
     last_error: Option<CanvasError>,
     seed: u64,
@@ -343,6 +350,7 @@ impl CanvasEditor {
             snapping: Snapping::default(),
             gesture: Gesture::Idle,
             text: None,
+            text_engine: Arc::new(rndr_core::BuiltinText::new()),
             overlay: Overlay::default(),
             last_error: None,
             seed: now_seed() & 0xffff_ffff,
@@ -394,6 +402,34 @@ impl CanvasEditor {
 
     pub fn overlay(&self) -> &Overlay {
         &self.overlay
+    }
+
+    /// Use the host's shaping engine for caret hit testing and editing chrome.
+    /// `view::update` supplies this automatically.
+    pub fn set_text_engine(&mut self, engine: Arc<dyn rndr_core::TextEngine>) {
+        self.text_engine = engine;
+    }
+
+    /// Directed selection `(anchor, caret)` in UTF-8 bytes, or no active edit.
+    pub fn text_selection(&self) -> Option<(usize, usize)> {
+        self.text.as_ref().map(|t| (t.anchor, t.caret))
+    }
+
+    /// Set a directed selection. Invalid UTF-8 boundaries are refused.
+    /// Replacement and deletion widen selections to core grapheme boundaries.
+    pub fn set_text_selection(&mut self, anchor: usize, caret: usize) -> bool {
+        let Some(edit) = &mut self.text else {
+            return false;
+        };
+        let Content::Text { text, .. } = &edit.node.content else {
+            return false;
+        };
+        if !text.is_char_boundary(anchor) || !text.is_char_boundary(caret) {
+            return false;
+        }
+        edit.anchor = anchor;
+        edit.caret = caret;
+        true
     }
 
     /// Id of the text node being typed into.
@@ -764,11 +800,23 @@ impl CanvasEditor {
         let Some(node) = SceneIndex::new(self.index_nodes()).get(id).cloned() else {
             return false;
         };
-        if !matches!(node.content, Content::Text { .. }) {
+        if !matches!(node.content, Content::Text { .. })
+            || !SceneIndex::new(self.index_nodes()).editable(&node)
+        {
             return false;
         }
         self.text = Some(TextEdit {
             id: node.id.clone(),
+            caret: match &node.content {
+                Content::Text { text, .. } => text.len(),
+                _ => 0,
+            },
+            anchor: match &node.content {
+                Content::Text { text, .. } => text.len(),
+                _ => 0,
+            },
+            dragging: false,
+            preedit: String::new(),
             original: Some(node.clone()),
             node,
         });
@@ -779,35 +827,16 @@ impl CanvasEditor {
         let Some(edit) = &mut self.text else {
             return false;
         };
-        let Content::Text { text, .. } = &mut edit.node.content else {
+        if !edit.preedit.is_empty() {
             return false;
-        };
-        let mut changed = false;
-        for (key, mods) in keys {
-            match key {
-                Key::Backspace => {
-                    changed |= text.pop().is_some();
-                }
-                Key::Enter if !mods.primary => {
-                    text.push('\n');
-                    changed = true;
-                }
-                _ => {}
-            }
         }
-        let typed: String = typed.chars().filter(|c| !c.is_control()).collect();
-        if !typed.is_empty() {
-            text.push_str(&typed);
-            changed = true;
+        let before = edit.node.clone();
+        let selection = (edit.anchor, edit.caret);
+        for &(key, mods) in keys {
+            crate::text_edit::key(edit, key, mods, self.text_engine.as_ref());
         }
-        if changed {
-            // Spans may no longer line up with the text.
-            if let Some(layout) = &mut edit.node.text_layout {
-                let length = text.encode_utf16().count() as u32;
-                layout.spans.retain(|s| s.end <= length);
-            }
-        }
-        changed
+        crate::text_edit::insert(edit, typed);
+        before != edit.node || selection != (edit.anchor, edit.caret)
     }
 
     /// Runs one frame. `measure` must match the painter's.
@@ -834,8 +863,19 @@ impl CanvasEditor {
         let mut changed = false;
         for &(key, mods) in &input.keys {
             if self.text.is_some() {
+                if self.text.as_ref().is_some_and(|t| !t.preedit.is_empty()) {
+                    continue;
+                }
                 if key == Key::Escape || (key == Key::Enter && mods.primary) {
-                    changed |= self.finish_text() || true;
+                    self.finish_text();
+                    changed = true;
+                } else if mods.primary && matches!(key, Key::Char('z' | 'y')) {
+                    self.finish_text();
+                    changed |= if key == Key::Char('y') || mods.shift {
+                        self.redo()
+                    } else {
+                        self.undo()
+                    };
                 }
                 continue;
             }
@@ -967,6 +1007,9 @@ impl CanvasEditor {
     }
 
     fn cursor(&self, pointer: &PointerInput, measure: &dyn TextMeasure) -> CursorHint {
+        if self.text.is_some() {
+            return CursorHint::Text;
+        }
         match self.tool {
             Tool::Hand => CursorHint::Grab,
             Tool::Text => CursorHint::Text,
@@ -1003,6 +1046,9 @@ impl CanvasEditor {
         measure: &dyn TextMeasure,
     ) -> bool {
         let mut changed = false;
+        if self.text_pointer(pointer, input.modifiers.shift, measure) {
+            return true;
+        }
         if pointer.pressed {
             changed |= self.press(pointer, input, measure);
         }
@@ -1126,6 +1172,10 @@ impl CanvasEditor {
                     id,
                     original: None,
                     node,
+                    caret: 0,
+                    anchor: 0,
+                    dragging: false,
+                    preedit: String::new(),
                 });
                 self.selection.clear();
                 true

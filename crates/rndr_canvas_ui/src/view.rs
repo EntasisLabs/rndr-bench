@@ -7,11 +7,11 @@ use crate::editor::{
 };
 use crate::overlay::{paint_overlay, OverlayTheme};
 use crate::paint::{affine, paint_scene, EngineMeasure, ImageIds};
-use rndr_canvas::text::{EstimateMeasure, TextMeasure};
+use rndr_canvas::text::TextMeasure;
 use rndr_canvas::Vec2;
 use rndr_core::{
-    platform_of, Color, CursorStyle, Input, LogicalKey, MotionWatch, NamedKey, PointerButton,
-    PointerKind as CoreKind, Pointers, Rect, SurfaceSlot, World,
+    platform_of, Clipboard, Color, CursorStyle, Focus, Focusable, Input, LogicalKey, MotionWatch,
+    NamedKey, PointerButton, PointerKind as CoreKind, Pointers, Rect, SurfaceSlot, World,
 };
 use rndr_paint::{Canvas, CanvasPainter, CanvasRegistry, FillRule, Path};
 
@@ -28,6 +28,8 @@ pub struct CanvasView {
     /// The [`SurfaceSlot`] id the canvas is laid out in.
     pub slot: u64,
     captured: bool,
+    focused: bool,
+    pending_input: Option<Input>,
     wheel: [f32; 2],
 }
 
@@ -40,6 +42,8 @@ impl CanvasView {
             backdrop: Color::rgb(0.976, 0.98, 0.984),
             slot,
             captured: false,
+            focused: false,
+            pending_input: None,
             wheel: [0.0, 0.0],
         }
     }
@@ -51,6 +55,14 @@ impl CanvasView {
 /// frame.
 pub fn install(world: &mut World, view: CanvasView) {
     let slot = view.slot;
+    for entity in world.entities_with::<SurfaceSlot>() {
+        if world
+            .get::<SurfaceSlot>(entity)
+            .is_some_and(|s| s.id == slot)
+        {
+            world.insert(entity, Focusable);
+        }
+    }
     world.insert_resource(view);
     if world.resource::<CanvasRegistry>().is_none() {
         world.insert_resource(CanvasRegistry::new());
@@ -62,10 +74,24 @@ pub fn install(world: &mut World, view: CanvasView) {
 }
 
 fn measure(world: &World) -> Box<dyn TextMeasure> {
-    match EngineMeasure::from_world(world) {
-        Some(m) => Box::new(m),
-        None => Box::new(EstimateMeasure),
-    }
+    Box::new(EngineMeasure(rndr_core::text_engine(world)))
+}
+
+/// Give keyboard focus to the installed canvas. Call after a toolbar or host
+/// adapter starts `editor.edit_text(id)` programmatically. Pointer presses in
+/// the surface focus it automatically; focus leaving commits the text draft.
+/// Returns false when the installed surface has not been spawned yet.
+pub fn focus(world: &mut World) -> bool {
+    let Some(slot) = world.resource::<CanvasView>().map(|v| v.slot) else {
+        return false;
+    };
+    let entity = world
+        .entities_with::<SurfaceSlot>()
+        .into_iter()
+        .find(|e| world.get::<SurfaceSlot>(*e).is_some_and(|s| s.id == slot));
+    let Some(entity) = entity else { return false };
+    world.insert(entity, Focusable);
+    rndr_core::request_focus(world, entity)
 }
 
 pub(crate) fn slot_rect(world: &World, slot: u64) -> Option<Rect> {
@@ -86,6 +112,8 @@ fn key(logical: &LogicalKey) -> Option<Key> {
         LogicalKey::Named(NamedKey::ArrowRight) => Key::Right,
         LogicalKey::Named(NamedKey::ArrowUp) => Key::Up,
         LogicalKey::Named(NamedKey::ArrowDown) => Key::Down,
+        LogicalKey::Named(NamedKey::Home) => Key::Home,
+        LogicalKey::Named(NamedKey::End) => Key::End,
         LogicalKey::Character(c) => Key::Char(c.to_ascii_lowercase()),
         _ => return None,
     })
@@ -229,6 +257,7 @@ pub fn editor_input(world: &World, rect: Rect, captured: bool) -> EditorInput {
 /// `add_system_front` after the plugins. The next [`update`] pans or zooms
 /// with it.
 pub fn take_wheel(world: &mut World) {
+    take_keyboard(world);
     let Some((slot, captured)) = world.resource::<CanvasView>().map(|v| (v.slot, v.captured))
     else {
         return;
@@ -251,6 +280,61 @@ pub fn take_wheel(world: &mut World) {
     }
 }
 
+/// Reserves the focused surface's keyboard queue before other UI interpreters.
+/// [`take_wheel`] calls this too, preserving existing installation code. Register
+/// at the front of `Schedule::Input`; `update` consumes the saved queue once.
+/// Tab commits text and is deliberately left to the native focus traversal.
+pub fn take_keyboard(world: &mut World) {
+    let Some(slot) = world.resource::<CanvasView>().map(|v| v.slot) else {
+        return;
+    };
+    let entity = world
+        .entities_with::<SurfaceSlot>()
+        .into_iter()
+        .find(|e| world.get::<SurfaceSlot>(*e).is_some_and(|s| s.id == slot));
+    let Some(entity) = entity else { return };
+    world.insert(entity, Focusable);
+    if world.resource::<Focus>().and_then(|f| f.entity) != Some(entity)
+        || !rndr_core::access_details(world, entity).focus
+        || rndr_core::events::<rndr_core::WindowFocus>(world)
+            .contains(&rndr_core::WindowFocus::Blurred)
+    {
+        return;
+    }
+    let input = world.resource::<Input>().cloned().unwrap_or_default();
+    if input.pointer.pressed
+        && slot_rect(world, slot).is_some_and(|r| {
+            let [x, y] = input.pointer.position;
+            x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h
+        })
+    {
+        return;
+    }
+    let tab = input.ime_preedit.is_empty()
+        && input.keys.iter().any(|e| {
+            !e.released
+                && !e.synthetic
+                && !e.modifiers.command()
+                && e.logical == LogicalKey::Named(NamedKey::Tab)
+        });
+    if tab || input.key == Some(rndr_core::Key::Tab) && input.ime_preedit.is_empty() {
+        world
+            .resource_mut::<CanvasView>()
+            .unwrap()
+            .editor
+            .finish_text();
+        world.remove::<rndr_core::CapturesKeys>(entity);
+        return;
+    }
+    world.resource_mut::<CanvasView>().unwrap().pending_input = Some(input);
+    if let Some(input) = world.resource_mut::<Input>() {
+        input.keys.clear();
+        input.key = None;
+        input.chars.clear();
+        input.ime_commit.clear();
+    }
+}
+
 /// Feeds this frame's input to the installed [`CanvasView`].
 pub fn update(world: &mut World) {
     let Some(slot) = world.resource::<CanvasView>().map(|v| v.slot) else {
@@ -262,15 +346,95 @@ pub fn update(world: &mut World) {
     let captured = world.resource::<CanvasView>().is_some_and(|v| v.captured);
     let mut input = editor_input(world, rect, captured);
     let measure = measure(world);
+    let engine = rndr_core::text_engine(world);
+    let pending = world
+        .resource_mut::<CanvasView>()
+        .and_then(|v| v.pending_input.take());
+    let native = pending.unwrap_or_else(|| world.resource::<Input>().cloned().unwrap_or_default());
+    let platform = platform_of(world);
+    // Pointer/wheel stay in the world for layout; keyboard may have been
+    // reserved before Chrome/keymap input.
+    input.keys = native
+        .keys
+        .iter()
+        .filter(|e| !e.released)
+        .filter_map(|e| {
+            key(&e.logical).map(|k| {
+                (
+                    k,
+                    Modifiers {
+                        shift: e.modifiers.shift,
+                        alt: e.modifiers.alt,
+                        primary: e.modifiers.primary(platform),
+                    },
+                )
+            })
+        })
+        .collect();
+    input.text = if input.modifiers.primary {
+        String::new()
+    } else {
+        native.chars.clone()
+    };
+    let slot_entity = world
+        .entities_with::<SurfaceSlot>()
+        .into_iter()
+        .find(|e| world.get::<SurfaceSlot>(*e).is_some_and(|s| s.id == slot));
+    let pressed_inside = input.pointer.as_ref().is_some_and(|p| p.pressed);
+    let blurred = rndr_core::events::<rndr_core::WindowFocus>(world)
+        .contains(&rndr_core::WindowFocus::Blurred);
+    let admitted = slot_entity.is_some_and(|e| rndr_core::access_details(world, e).focus);
+    if pressed_inside && !blurred {
+        if let Some(entity) = slot_entity {
+            rndr_core::request_focus(world, entity);
+        }
+    }
+    let owns_focus =
+        admitted && !blurred && world.resource::<Focus>().and_then(|f| f.entity) == slot_entity;
+    let mut clipboard = world.resource::<Clipboard>().cloned().unwrap_or_default();
     let Some(view) = world.resource_mut::<CanvasView>() else {
         return;
     };
+    view.editor.set_text_engine(engine);
+    if (view.focused || blurred) && !owns_focus {
+        view.editor.finish_text();
+    }
+    view.focused = owns_focus;
+    if !owns_focus
+        || view
+            .editor
+            .handle_native_text(&native, platform, &mut clipboard)
+    {
+        input.keys.clear();
+        input.text.clear();
+    }
     let wheel = std::mem::take(&mut view.wheel);
     input.scroll[0] += wheel[0];
     input.scroll[1] += wheel[1];
+    if !admitted || blurred {
+        input.pointer = None;
+        input.scroll = [0.0, 0.0];
+    }
     let response = view.editor.handle(&input, measure.as_ref());
+    let editing = view.editor.editing_text().is_some();
     if let Some(p) = &input.pointer {
         view.captured = p.down && !p.released;
+    }
+    world.insert_resource(clipboard);
+    if let Some(entity) = slot_entity {
+        if editing {
+            world.insert(entity, rndr_core::CapturesKeys);
+        } else {
+            world.remove::<rndr_core::CapturesKeys>(entity);
+        }
+    }
+    if owns_focus {
+        if let Some(native) = world.resource_mut::<Input>() {
+            native.keys.clear();
+            native.key = None;
+            native.chars.clear();
+            native.ime_commit.clear();
+        }
     }
     if input.pointer.is_some() {
         world.insert_resource(match response.cursor {
@@ -323,5 +487,7 @@ impl CanvasPainter for ViewPainter {
             measure.as_ref(),
         );
         paint_overlay(canvas, &view.editor, measure.as_ref(), &view.overlay);
+        view.editor
+            .paint_text_edit(canvas, world, measure.as_ref(), view.overlay.accent);
     }
 }

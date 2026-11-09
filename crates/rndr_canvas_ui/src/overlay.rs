@@ -113,9 +113,13 @@ pub fn paint_overlay(
             node_outline(canvas, &node.id, px);
         }
     }
-    let frame = state
-        .rotating
-        .or_else(|| index.selection_frame(editor.selection()));
+    let frame = if editor.editing_text().is_none() {
+        state
+            .rotating
+            .or_else(|| index.selection_frame(editor.selection()))
+    } else {
+        None
+    };
     if let (Some(frame), false) = (frame, selected.is_empty()) {
         let single_line = selected.len() == 1 && LineGeometry::of(selected[0]).is_some();
         if single_line {

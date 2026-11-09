@@ -39,6 +39,17 @@ impl EngineMeasure {
 
 impl TextMeasure for EngineMeasure {
     fn width(&self, line: &str, font: &Font<'_>) -> f64 {
+        EngineMeasureRef(self.0.as_ref()).width(line, font)
+    }
+    fn styled_width(&self, line: &str, font: &Font<'_>, runs: &[StyledRun]) -> f64 {
+        EngineMeasureRef(self.0.as_ref()).styled_width(line, font, runs)
+    }
+}
+
+pub(crate) struct EngineMeasureRef<'a>(pub &'a dyn TextEngine);
+
+impl TextMeasure for EngineMeasureRef<'_> {
+    fn width(&self, line: &str, font: &Font<'_>) -> f64 {
         self.styled_width(line, font, &[])
     }
 
@@ -317,58 +328,60 @@ impl Painter<'_> {
     }
 
     fn text(&self, canvas: &mut Canvas, node: &Node) {
-        let Content::Text {
-            text,
-            color,
-            font_family,
-            font_size,
-            font_weight,
-            font_style,
-        } = &node.content
-        else {
-            return;
-        };
-        let layout = node.text_layout.as_ref();
-        let size = *font_size as f32;
-        let padding = size * 0.06;
-        let style = TextStyle {
-            family: font_family.clone(),
-            size,
-            weight: font_weight.unwrap_or(FONT_WEIGHT_REGULAR),
-            style: match font_style.unwrap_or(CanvasFontStyle::Normal) {
-                CanvasFontStyle::Italic => FontStyle::Italic,
-                CanvasFontStyle::Normal => FontStyle::Normal,
-            },
-            letter_spacing: layout.and_then(|l| l.letter_spacing).unwrap_or(0.0) as f32,
-            paragraph_spacing: layout.and_then(|l| l.paragraph_spacing).unwrap_or(0.0) as f32,
-            align: match layout.map_or(CanvasAlign::Left, |l| l.align) {
-                CanvasAlign::Left => TextAlign::Start,
-                CanvasAlign::Center => TextAlign::Center,
-                CanvasAlign::Right => TextAlign::End,
-            },
-            line_height: Some(layout.map_or(DEFAULT_LINE_HEIGHT, |l| l.line_height) as f32),
-            ..TextStyle::default()
-        };
         let (width, _) = self.index.dimensions(node);
-        let max_width = match layout.and_then(|l| l.width) {
-            Some(_) => (width as f32 - padding * 2.0).max(1.0),
-            None if !matches!(style.align, TextAlign::Start) => {
-                (width as f32 - padding * 2.0).max(1.0)
-            }
-            None => f32::INFINITY,
-        };
-        canvas.text(
-            self.world,
-            TextSource {
-                text: text.clone(),
-                style,
-                spans: text_spans(node, text, color),
-                max_width,
-                origin: [padding, padding],
-                color: parse_color(color),
-            },
-        );
+        if let Some(source) = text_source(node, width) {
+            canvas.text(self.world, source);
+        }
     }
+}
+
+// One style/wrapping source for scene painting and caret/selection shaping.
+pub(crate) fn text_source(node: &Node, width: f64) -> Option<TextSource> {
+    let Content::Text {
+        text,
+        color,
+        font_family,
+        font_size,
+        font_weight,
+        font_style,
+    } = &node.content
+    else {
+        return None;
+    };
+    let layout = node.text_layout.as_ref();
+    let size = *font_size as f32;
+    let padding = size * 0.06;
+    let style = TextStyle {
+        family: font_family.clone(),
+        size,
+        weight: font_weight.unwrap_or(FONT_WEIGHT_REGULAR),
+        style: match font_style.unwrap_or(CanvasFontStyle::Normal) {
+            CanvasFontStyle::Italic => FontStyle::Italic,
+            CanvasFontStyle::Normal => FontStyle::Normal,
+        },
+        letter_spacing: layout.and_then(|l| l.letter_spacing).unwrap_or(0.0) as f32,
+        paragraph_spacing: layout.and_then(|l| l.paragraph_spacing).unwrap_or(0.0) as f32,
+        align: match layout.map_or(CanvasAlign::Left, |l| l.align) {
+            CanvasAlign::Left => TextAlign::Start,
+            CanvasAlign::Center => TextAlign::Center,
+            CanvasAlign::Right => TextAlign::End,
+        },
+        line_height: Some(layout.map_or(DEFAULT_LINE_HEIGHT, |l| l.line_height) as f32),
+        ..TextStyle::default()
+    };
+    let max_width = match layout.and_then(|l| l.width) {
+        Some(_) => (width as f32 - padding * 2.0).max(1.0),
+        None if !matches!(style.align, TextAlign::Start) => (width as f32 - padding * 2.0).max(1.0),
+        None => f32::INFINITY,
+    };
+    Some(TextSource {
+        text: text.clone(),
+        style,
+        spans: text_spans(node, text, color),
+        max_width,
+        origin: [padding, padding],
+        color: parse_color(color),
+    })
 }
 
 /// Byte offset of a UTF-16 offset, clamped to the text.
@@ -383,7 +396,7 @@ pub fn utf16_to_byte(text: &str, offset: u32) -> usize {
     text.len()
 }
 
-fn text_spans(node: &Node, text: &str, color: &str) -> Vec<TextSpan> {
+pub(crate) fn text_spans(node: &Node, text: &str, color: &str) -> Vec<TextSpan> {
     let layout = node.text_layout.as_ref();
     let underline_all = layout.and_then(|l| l.underline).unwrap_or(false);
     let spans = layout.map_or(&[][..], |l| l.spans.as_slice());
