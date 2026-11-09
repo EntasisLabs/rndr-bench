@@ -193,17 +193,20 @@ pub fn editor_input(world: &World, rect: Rect, captured: bool) -> EditorInput {
             .keys
             .iter()
             .filter(|e| !e.released)
-            .filter_map(|e| {
-                key(&e.logical).map(|k| {
-                    (
-                        k,
-                        Modifiers {
-                            shift: e.modifiers.shift,
-                            alt: e.modifiers.alt,
-                            primary: e.modifiers.primary(platform),
-                        },
-                    )
-                })
+            .filter_map(|event| {
+                let key = match rndr_core::standard_action(platform, event) {
+                    Some(rndr_core::EditAction::Undo) => Some(Key::Char('z')),
+                    Some(rndr_core::EditAction::Redo) => Some(Key::Char('y')),
+                    _ => key(&event.logical),
+                }?;
+                Some((
+                    key,
+                    Modifiers {
+                        shift: event.modifiers.shift,
+                        alt: event.modifiers.alt,
+                        primary: event.modifiers.primary(platform),
+                    },
+                ))
             })
             .collect(),
         text: if modifiers.primary {
@@ -221,15 +224,30 @@ pub fn editor_input(world: &World, rect: Rect, captured: bool) -> EditorInput {
 
 /// Claims the wheel while the pointer is over the canvas (or a press that
 /// began there is held), before layout's scroll pass consumes it for the
-/// surrounding scrollports. `rndr_ui` runs [`rndr_core::apply_scroll`] at the
-/// front of [`rndr_core::Schedule::Input`], so add this with
-/// `add_system_front` after the plugins. The next [`update`] pans or zooms
-/// with it.
+/// scrollports. Ineligible slots do not claim the wheel. `rndr_ui` runs
+/// [`rndr_core::apply_scroll`] at the front of [`rndr_core::Schedule::Input`],
+/// so add this with `add_system_front` after the plugins. The next [`update`]
+/// pans or zooms with it.
 pub fn take_wheel(world: &mut World) {
     let Some((slot, captured)) = world.resource::<CanvasView>().map(|v| (v.slot, v.captured))
     else {
         return;
     };
+    let Some(entity) = world
+        .entities_with::<SurfaceSlot>()
+        .into_iter()
+        .find(|entity| {
+            world
+                .get::<SurfaceSlot>(*entity)
+                .is_some_and(|surface| surface.id == slot)
+        })
+    else {
+        return;
+    };
+    world.insert(entity, rndr_core::Focusable);
+    if !rndr_core::access_details(world, entity).focus {
+        return;
+    }
     let Some(rect) = slot_rect(world, slot) else {
         return;
     };
@@ -269,6 +287,16 @@ pub fn update(world: &mut World) {
         return;
     };
     world.insert(entity, rndr_core::Focusable);
+    if !rndr_core::access_details(world, entity).focus {
+        world.remove::<rndr_core::CapturesKeys>(entity);
+        world.remove::<rndr_core::Caret>(entity);
+        world.remove::<rndr_core::TextLayout>(entity);
+        if let Some(view) = world.resource_mut::<CanvasView>() {
+            view.captured = false;
+            view.wheel = [0.0, 0.0];
+        }
+        return;
+    }
     let native = world.resource::<Input>().cloned().unwrap_or_default();
     let focused = world.resource::<rndr_core::Focus>().and_then(|f| f.entity) == Some(entity);
     let pressed_here = input.pointer.as_ref().is_some_and(|p| p.pressed);

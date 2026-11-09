@@ -82,6 +82,35 @@ fn presses_outside_the_slot_are_ignored_but_drags_out_of_it_continue() {
 }
 
 #[test]
+fn disabled_canvas_does_not_claim_wheel_input() {
+    use rndr_core::ControlDisabled;
+
+    let mut world = world();
+    let slot = world
+        .entities_with::<SurfaceSlot>()
+        .into_iter()
+        .find(|entity| {
+            world
+                .get::<SurfaceSlot>(*entity)
+                .is_some_and(|slot| slot.id == 7)
+        })
+        .unwrap();
+    world.insert(slot, ControlDisabled);
+    world.insert_resource(Input {
+        pointer: Pointer {
+            position: [300.0, 200.0],
+            ..Pointer::default()
+        },
+        scroll: [0.0, 40.0],
+        ..Input::default()
+    });
+
+    view::take_wheel(&mut world);
+
+    assert_eq!(world.resource::<Input>().unwrap().scroll, [0.0, 40.0]);
+}
+
+#[test]
 fn claimed_wheel_survives_the_layout_scroll_pass() {
     let mut world = world();
     world.insert_resource(Input {

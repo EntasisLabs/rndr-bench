@@ -67,7 +67,7 @@ fn initial_keys(blocks: &[LiquidBlock], ids: &[Option<String>]) -> Vec<Identity>
 /// Result of a host source update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiquidUpdate {
-    /// Complete candidate accepted; projection runs on the next frame.
+    /// Complete candidate accepted; the host is woken to project it next frame.
     Applied,
     /// Unfinished fence detected. The last accepted UI is untouched.
     Incomplete,
@@ -131,7 +131,8 @@ pub fn liquid_view(world: &mut World, source: &str) -> Entity {
 }
 
 /// Replace the whole source of a Liquid view. Every mounted block is rebuilt
-/// on the next frame; block state such as the open tab is reset.
+/// on the next frame; block state such as the open tab is reset. The host is
+/// woken so the replacement settles even when the window was otherwise idle.
 pub fn set_liquid_source(world: &mut World, view: Entity, source: &str) {
     let doc = LiquidDocument::parse(source);
     detach_all(world, view);
@@ -142,6 +143,7 @@ pub fn set_liquid_source(world: &mut World, view: Entity, source: &str) {
     if let Some(md) = world.get_mut::<MarkdownView>(view) {
         md.set_markdown(doc.markdown);
     }
+    rndr_core::frame_wake(world).wake();
 }
 
 /// Reconcile a complete host snapshot without replacing unchanged controls.
@@ -155,6 +157,8 @@ pub fn set_liquid_source(world: &mut World, view: Entity, source: &str) {
 /// snapshot, including identical snapshots. Incomplete candidates leave the
 /// entire last valid document intact; callers resend the completed snapshot.
 /// [`set_liquid_source`] remains the intentional destructive reset operation.
+/// Accepted updates wake the host so the projection runs on the next frame,
+/// even when the window was idle. Incomplete and refused updates do not wake it.
 pub fn update_liquid_source(
     world: &mut World,
     view: Entity,
@@ -169,6 +173,7 @@ pub fn update_liquid_source(
     let doc = LiquidDocument::parse(source);
     let keys = identities(&doc.blocks, &doc.ids)?;
     apply_document(world, view, Arc::new(doc.blocks), keys, &doc.markdown)?;
+    rndr_core::frame_wake(world).wake();
     Ok(LiquidUpdate::Applied)
 }
 

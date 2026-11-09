@@ -311,6 +311,114 @@ fn canvas_focus_owns_native_keys_and_releases_them_to_other_controls() {
 }
 
 #[test]
+fn disabled_canvas_does_not_mutate_or_consume_input_from_stale_focus() {
+    use rndr_canvas_ui::view::{self, CanvasView};
+    use rndr_core::{ControlDisabled, Focus, Input, KeyEvent, Layout, Rect, SurfaceSlot, World};
+
+    let mut world = World::new();
+    let slot = world.spawn((
+        Layout::column(),
+        SurfaceSlot { id: 9 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        },
+    ));
+    view::install(&mut world, CanvasView::new(editor("abc"), 9));
+    world.insert_resource(Focus { entity: Some(slot) });
+    world.insert(slot, ControlDisabled);
+    let event = KeyEvent::character('x', rndr_core::Modifiers::new());
+    world.insert_resource(Input {
+        keys: vec![event.clone()],
+        chars: "x".into(),
+        ..Input::default()
+    });
+
+    view::update(&mut world);
+
+    assert_eq!(text(&world.resource::<CanvasView>().unwrap().editor), "abc");
+    assert_eq!(world.resource::<Input>().unwrap().keys, vec![event]);
+    assert_eq!(world.resource::<Input>().unwrap().chars, "x");
+
+    let shortcut = KeyEvent::character(
+        'z',
+        rndr_core::Modifiers {
+            super_key: true,
+            ..rndr_core::Modifiers::new()
+        },
+    );
+    world.insert_resource(Input {
+        keys: vec![shortcut.clone()],
+        ..Input::default()
+    });
+    view::update(&mut world);
+
+    assert_eq!(text(&world.resource::<CanvasView>().unwrap().editor), "abc");
+    assert_eq!(world.resource::<Input>().unwrap().keys, vec![shortcut]);
+}
+
+#[test]
+fn physical_undo_and_redo_work_with_a_non_latin_logical_layout() {
+    use rndr_canvas_ui::view::{self, CanvasView};
+    use rndr_core::{Focus, Input, KeyCode, KeyEvent, Layout, Platform, Rect, SurfaceSlot, World};
+
+    let mut world = World::new();
+    let slot = world.spawn((
+        Layout::column(),
+        SurfaceSlot { id: 9 },
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        },
+    ));
+    view::install(&mut world, CanvasView::new(editor("abc"), 9));
+    world.insert_resource(Focus { entity: Some(slot) });
+    world.insert_resource(Platform::Mac);
+    world.insert_resource(Input {
+        keys: vec![KeyEvent::character('x', rndr_core::Modifiers::new())],
+        chars: "x".into(),
+        ..Input::default()
+    });
+    view::update(&mut world);
+    assert_eq!(
+        text(&world.resource::<CanvasView>().unwrap().editor),
+        "abcx"
+    );
+
+    let command = rndr_core::Modifiers {
+        super_key: true,
+        ..rndr_core::Modifiers::new()
+    };
+    world.insert_resource(Input {
+        keys: vec![KeyEvent::character('я', command).with_code(KeyCode::Letter('z'))],
+        ..Input::default()
+    });
+    view::update(&mut world);
+    assert_eq!(text(&world.resource::<CanvasView>().unwrap().editor), "abc");
+
+    world.insert_resource(Input {
+        keys: vec![KeyEvent::character(
+            'я',
+            rndr_core::Modifiers {
+                shift: true,
+                ..command
+            },
+        )
+        .with_code(KeyCode::Letter('z'))],
+        ..Input::default()
+    });
+    view::update(&mut world);
+    assert_eq!(
+        text(&world.resource::<CanvasView>().unwrap().editor),
+        "abcx"
+    );
+}
+
+#[test]
 fn text_overlay_draws_caret_and_selection_instead_of_object_handles() {
     use rndr_canvas_ui::overlay::{paint_overlay, OverlayTheme};
     let mut editor = editor("abcdef");

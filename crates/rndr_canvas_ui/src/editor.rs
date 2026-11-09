@@ -1076,8 +1076,11 @@ impl CanvasEditor {
                 let primary = event.modifiers.primary(platform);
                 let finish = event.logical == LogicalKey::Named(NamedKey::Escape)
                     || (event.logical == LogicalKey::Named(NamedKey::Enter) && primary);
-                let history = primary
-                    && matches!(event.logical, LogicalKey::Character('z' | 'Z' | 'y' | 'Y'));
+                let history_action = rndr_core::standard_action(platform, event);
+                let history = matches!(
+                    history_action,
+                    Some(rndr_core::EditAction::Undo | rndr_core::EditAction::Redo)
+                );
                 if self.text.is_some()
                     && (finish || history)
                     && filtered.preedit.is_empty()
@@ -1094,13 +1097,11 @@ impl CanvasEditor {
                         );
                     }
                     if history {
-                        if event.modifiers.shift
-                            || matches!(event.logical, LogicalKey::Character('y' | 'Y'))
-                        {
-                            self.redo();
-                        } else {
-                            self.undo();
-                        }
+                        match history_action {
+                            Some(rndr_core::EditAction::Undo) => self.undo(),
+                            Some(rndr_core::EditAction::Redo) => self.redo(),
+                            _ => unreachable!("history action was resolved above"),
+                        };
                     } else {
                         self.finish_text();
                     }

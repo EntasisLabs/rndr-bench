@@ -5,6 +5,7 @@ use rndr_canvas::Content;
 use rndr_canvas_ui::view::CanvasView;
 use rndr_core::*;
 use rndr_liquid_ui::*;
+use std::sync::Arc;
 
 fn frames(app: &mut App) {
     for _ in 0..3 {
@@ -195,4 +196,29 @@ fn one_host_routes_liquid_drafts_and_canvas_edits_into_shared_document_history()
         100.0
     );
     assert_eq!(app.world().get::<Label>(input).unwrap().text, draft);
+}
+
+#[test]
+fn reset_after_streaming_wakes_an_idle_host_and_settles_all_slots() {
+    let mut app = build_app();
+    frames(&mut app);
+    let fixture = *app.world().resource::<Fixture>().unwrap();
+    for stage in 1..=6 {
+        update_liquid_source(app.world_mut(), fixture.liquid, &liquid_snapshot(stage)).unwrap();
+        frames(&mut app);
+    }
+
+    let wake = CountingWake::new();
+    app.set_wake(Arc::new(wake.clone()));
+    let before = wake.hits();
+    command(app.world_mut(), liquid_canvas_integration::RESET);
+
+    assert!(
+        wake.hits() > before,
+        "reset must schedule reconciliation while idle"
+    );
+    rndr_paint::frame(&mut app);
+    let liquid = app.world().get::<LiquidView>(fixture.liquid).unwrap();
+    assert_eq!(liquid.mounted(), vec![0, 1, 2]);
+    assert_eq!(liquid.blocks().len(), 3);
 }
