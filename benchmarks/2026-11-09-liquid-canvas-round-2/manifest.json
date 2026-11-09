@@ -1,0 +1,35 @@
+{
+  "run": "2026-11-09-round-2",
+  "kind": "follow-up remediation snapshots; not a controlled fresh benchmark",
+  "original_shared_baseline": "b2a1c214cb9856a73efca25000a0fa5bf51c1b25",
+  "verification": "Snapshot tree/parent identity, transfer SHA-256, bundle verification and diff whitespace only. No builds or tests rerun by archivist.",
+  "results": [
+    {
+      "agent": "medousa",
+      "parent": "a22dfd015a7dcdfb742926cc8269c547d7180aab",
+      "tip": "8ca918cf4df56dfdb69a8c55875b428e8bb6b3f6",
+      "tree": "bb6c0910493fdd68ed11f77483804fb4efd87f22",
+      "branch": "benchmarks/2026-11-09-round-2/medousa",
+      "status_before": "M BENCHMARK_REPORT.md\n M crates/rndr_canvas_ui/README.md\n M crates/rndr_canvas_ui/src/editor.rs\n M crates/rndr_canvas_ui/src/text_edit.rs\n M crates/rndr_canvas_ui/src/view.rs\n M crates/rndr_canvas_ui/tests/text_editing.rs\n M crates/rndr_core/src/app.rs\n M crates/rndr_core/src/markdown.rs\n M crates/rndr_core/src/markdown/host.rs\n M crates/rndr_liquid_ui/README.md\n M crates/rndr_liquid_ui/src/controls.rs\n M crates/rndr_liquid_ui/src/view.rs\n M crates/rndr_liquid_ui/tests/reconcile.rs\n M examples/liquid_canvas_integration/README.md\n M examples/liquid_canvas_integration/VALIDATION.md\n M examples/liquid_canvas_integration/src/main.rs\n?? crates/rndr_canvas_ui/tests/publication.rs\n?? crates/rndr_core/tests/markdown_idle.rs\n?? crates/rndr_liquid_ui/tests/idle_reset_review.rs",
+      "diff_stat": "BENCHMARK_REPORT.md                              | 245 ++++++++++++++++++++\n crates/rndr_canvas_ui/README.md                  |  27 ++-\n crates/rndr_canvas_ui/src/editor.rs              |  33 ++-\n crates/rndr_canvas_ui/src/text_edit.rs           |  17 +-\n crates/rndr_canvas_ui/src/view.rs                |  89 ++++---\n crates/rndr_canvas_ui/tests/publication.rs       | 283 +++++++++++++++++++++++\n crates/rndr_canvas_ui/tests/text_editing.rs      | 201 ++++++++++++++++\n crates/rndr_core/src/app.rs                      |  10 +-\n crates/rndr_core/src/markdown.rs                 |  18 ++\n crates/rndr_core/src/markdown/host.rs            |   9 +\n crates/rndr_core/tests/markdown_idle.rs          |  57 +++++\n crates/rndr_liquid_ui/README.md                  |  15 +-\n crates/rndr_liquid_ui/src/controls.rs            |  60 ++++-\n crates/rndr_liquid_ui/src/view.rs                |  19 +-\n crates/rndr_liquid_ui/tests/idle_reset_review.rs |  90 +++++++\n crates/rndr_liquid_ui/tests/reconcile.rs         | 118 ++++++++++\n examples/liquid_canvas_integration/README.md     |   2 +\n examples/liquid_canvas_integration/VALIDATION.md |  41 ++++\n examples/liquid_canvas_integration/src/main.rs   | 141 ++++++++++-\n 19 files changed, 1402 insertions(+), 73 deletions(-)"
+    },
+    {
+      "agent": "hermes",
+      "parent": "d73ace95f5293da4d97aa8d34fbab5d83d3ad8a2",
+      "tip": "453eaf45f56cc418d49f15219a939b2f0aed5c48",
+      "tree": "50741039d49be53c5fefb5c69486f6d53848615f",
+      "branch": "benchmarks/2026-11-09-round-2/hermes",
+      "status_before": "M crates/rndr_canvas_ui/src/editor.rs\n M crates/rndr_canvas_ui/src/view.rs\n M crates/rndr_canvas_ui/tests/text_editing.rs\n M crates/rndr_canvas_ui/tests/view.rs\n M crates/rndr_liquid_ui/src/view.rs\n M examples/liquid_canvas_integration/tests/host.rs",
+      "diff_stat": "crates/rndr_canvas_ui/src/editor.rs              |  19 ++--\n crates/rndr_canvas_ui/src/view.rs                |  58 ++++++++----\n crates/rndr_canvas_ui/tests/text_editing.rs      | 108 +++++++++++++++++++++++\n crates/rndr_canvas_ui/tests/view.rs              |  29 ++++++\n crates/rndr_liquid_ui/src/view.rs                |   9 +-\n examples/liquid_canvas_integration/tests/host.rs |  26 ++++++\n 6 files changed, 223 insertions(+), 26 deletions(-)"
+    },
+    {
+      "agent": "pi",
+      "parent": "bf3fe589411ab3421c5e7a50cb6e22ae4621ba32",
+      "tip": "5ab873c73cb1e2e768b822261239cb91ae8709f2",
+      "tree": "2c15767a88c05e80ccacd97a13bafe677cdcde81",
+      "branch": "benchmarks/2026-11-09-round-2/pi",
+      "status_before": "M crates/rndr_canvas/src/text.rs\n M crates/rndr_canvas_ui/src/editor.rs\n M crates/rndr_canvas_ui/src/paint.rs\n M crates/rndr_canvas_ui/tests/editor.rs\n?? REVISION_REPORT.md\n?? crates/rndr_canvas/tests/text_hit.rs",
+      "diff_stat": "REVISION_REPORT.md                    | 44 +++++++++++++++++++\n crates/rndr_canvas/src/text.rs        | 80 +++++++++++++++++++++++++++++++++++\n crates/rndr_canvas/tests/text_hit.rs  | 43 +++++++++++++++++++\n crates/rndr_canvas_ui/src/editor.rs   | 56 +++++++++++++++++++++---\n crates/rndr_canvas_ui/src/paint.rs    | 25 +++++++++++\n crates/rndr_canvas_ui/tests/editor.rs | 62 ++++++++++++++++++++++++++-\n 6 files changed, 303 insertions(+), 7 deletions(-)"
+    }
+  ]
+}

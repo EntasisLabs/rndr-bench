@@ -26,6 +26,13 @@ do not assume equivalent budgets or use commit count as a quality score.
 Medousa's commits required coordinator assistance with Git identity and one trailing
 space; no implementation logic was changed by that assistance.
 
+## 2026-11-09 — Round-two follow-up snapshots
+
+[Round-two index, provenance caveats and exact manifest](benchmarks/2026-11-09-liquid-canvas-round-2/README.md).
+Each result builds on its own first-round tip. The wrong-review mix-up is recorded;
+this is preservation of a non-controlled follow-up, not a fresh fair comparison.
+First-round branches remain unchanged.
+
 ## Inspect a result
 
 ```sh
