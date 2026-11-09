@@ -14,6 +14,8 @@ cargo run -p liquid_canvas_integration
 cargo test -p liquid_canvas_integration
 cargo run -p liquid_canvas_integration -- --headless
 cargo run -p liquid_canvas_integration -- --export /tmp/liquid-canvas.png
+cargo run -p liquid_canvas_integration -- --export /tmp/liquid-input-focus.png --export-focus draft
+cargo run -p liquid_canvas_integration -- --export /tmp/liquid-slider-focus.png --export-focus volume
 ```
 
 The desktop opens at 1500 × 960 logical pixels. `--headless` exercises both

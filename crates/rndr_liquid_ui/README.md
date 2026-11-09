@@ -66,9 +66,13 @@ An unindented fence-header `id:` establishes case-sensitive, document-scoped
 identity, including nested blocks. The same ID and kind retain owned content
 across Markdown insertions and component reordering. Removal or a kind change
 retires incompatible content. Initial/reset constructors remain infallible for
-compatibility; validate duplicate IDs using `LiquidDocument::parse_with_metadata`
-when initial data is not trusted. Legacy feed/styled-block IDs remain props as
-well as metadata.
+compatibility. Duplicate occurrences render independently, but only the first
+occurrence owns the public ID and can retain state on a later unique-ID update.
+Later duplicates retire through the normal cleanup boundary (including focus)
+rather than aliasing the surviving control. Incremental duplicate submissions
+still refuse atomically; validate initial data with
+`LiquidDocument::parse_with_metadata` when rejection is desired. Legacy
+feed/styled-block IDs remain props as well as metadata.
 
 Anonymous blocks match by kind and ordinal *among anonymous blocks of that kind*.
 Markdown and other-kind insertions are safe; insertion/removal/reordering of
@@ -81,7 +85,10 @@ Liquid owns the underlying Markdown projection: do not independently mutate its
 `MarkdownView`. Core MarkdownSlot roots are detached/recreated, never reparented;
 only host-owned content moves into new slots. Nested views share the outer block
 table and claim retained descendants through the same slot lifecycle. Normal
-Markdown frame synchronization settles nested mounts. Removal/kind change clears
+Markdown frame synchronization settles nested mounts. Pending source, slot bindings
+and post-layout host measurements keep `App::wants_frame` and `App::wants_update`
+true until published, so event-driven runners settle resets and nested content
+without another input event or a fixed number of extra frames. Removal/kind change clears
 canonical interaction targets and despawns the owned subtree. Component-owned
 RAII subscriptions/resources drop with it; externally retained host resources
 remain the host's responsibility. Drop-counted regression leases test retirement.

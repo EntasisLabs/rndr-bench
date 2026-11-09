@@ -2,7 +2,7 @@
 use rndr_core::*;
 use rndr_liquid::LiquidBlock;
 use rndr_ui::selection::{ChangeHandler, Checkbox, SelectionProps, SelectionValue};
-use rndr_ui::UiId;
+use rndr_ui::{Token, Typography, UiId, UiRecipe, UiStyle, UiTheme};
 
 /// Current local value of a Liquid control.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,10 +94,16 @@ fn field(world: &mut World, entity: Entity, transaction: FieldTransaction) {
 }
 fn text(world: &mut World, parent: Entity, value: &str) -> Entity {
     let entity = world.spawn((
-        Label::new(value),
+        Label::new(value).overflow(TextOverflow::Wrap),
+        LabelBox::CONTENT,
+        UiRecipe(UiStyle {
+            foreground: Some(Token::Text.into()),
+            typography: Some(Typography::Label),
+            ..UiStyle::default()
+        }),
         Layout {
             width: Size::Fill,
-            height: Size::Px(24.0),
+            height: Size::Hug,
             ..Layout::column()
         },
     ));
@@ -121,7 +127,9 @@ fn slider_value(world: &mut World, root: Entity, value: f64, user: bool) {
     if let Some(label) = world.get_mut::<Label>(control.editor) {
         let proportion = (value - props.min) / (props.max - props.min);
         let at = (proportion * 20.0).round() as usize;
-        label.text = format!("{}●{}  {value:.2}", "━".repeat(at), "─".repeat(20 - at));
+        // Bundled UI fonts need not contain box-drawing or symbol glyphs.
+        // A deliberately ASCII track stays legible with every supported engine.
+        label.text = format!("[{}|{}]  {value:.2}", "=".repeat(at), "-".repeat(20 - at));
     }
 }
 fn slider_key(world: &mut World, entity: Entity, key: &KeyEvent) -> bool {
@@ -191,16 +199,36 @@ pub(crate) fn mount(world: &mut World, root: Entity, block: &LiquidBlock) -> boo
                     ..Semantics::default()
                 },
             );
-            world.insert(editor, Color::rgb(0.16, 0.18, 0.23));
+            world.insert(
+                editor,
+                UiRecipe(UiStyle {
+                    background: Some(Token::Content.into()),
+                    foreground: Some(Token::Text.into()),
+                    typography: Some(Typography::Label),
+                    ..UiStyle::default()
+                }),
+            );
             if let Some(layout) = world.get_mut::<Layout>(editor) {
-                layout.height = Size::Px(36.0);
-                layout.padding = 6.0;
+                layout.height = Size::Hug;
+                layout.min_height = 36.0;
+                layout.padding = 8.0;
             }
             (editor, label, LiquidValue::Text(props.value.clone()), None)
         }
         LiquidBlock::Slider(props) => {
             let label = text(world, root, &props.label);
             let editor = text(world, root, "");
+            world.get_mut::<Layout>(editor).unwrap().min_height = 36.0;
+            world.get_mut::<Layout>(editor).unwrap().padding = 8.0;
+            world.insert(
+                editor,
+                UiRecipe(UiStyle {
+                    background: Some(Token::Content.into()),
+                    foreground: Some(Token::Text.into()),
+                    typography: Some(Typography::Code),
+                    ..UiStyle::default()
+                }),
+            );
             world.insert(editor, Focusable);
             world.insert(editor, Button::new("liquid-slider"));
             world.insert(
@@ -323,6 +351,24 @@ pub(crate) fn pointer(world: &mut World) {
         let Some(control) = world.get::<Control>(root).cloned() else {
             continue;
         };
+        // Input/slider boundaries and focus remain distinct from their fills.
+        // Resolve from the current theme, not a hard-coded dark surface.
+        if control.slider.is_some() || matches!(control.value, LiquidValue::Text(_)) {
+            let theme = world.resource::<UiTheme>().cloned().unwrap_or_default();
+            let focused =
+                world.resource::<Focus>().and_then(|focus| focus.entity) == Some(control.editor);
+            world.insert(
+                control.editor,
+                Border {
+                    color: theme.color(if focused {
+                        Token::Focus
+                    } else {
+                        Token::StrongStroke
+                    }),
+                    width: if focused { theme.focus_width() } else { 1.0 },
+                },
+            );
+        }
         let Some(props) = control.slider else {
             continue;
         };

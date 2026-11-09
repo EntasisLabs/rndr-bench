@@ -252,13 +252,16 @@ fn refresh_status(world: &mut World) {
 }
 
 fn app() -> App {
+    app_with_theme(UiTheme::default())
+}
+fn app_with_theme(theme: UiTheme) -> App {
     let mut app = App::new();
     let engine: Arc<dyn TextEngine> = Arc::new(rndr_render::ParleyText::bundled());
     app.world_mut().insert_resource(engine);
     app.add_plugin(UiPlugin);
     app.add_plugin(MarkdownPlugin);
     app.add_plugin(LiquidUiPlugin::new(MockHost));
-    apply_theme_bridge(app.world_mut(), UiTheme::default());
+    apply_theme_bridge(app.world_mut(), theme);
     let world = app.world_mut();
     world.insert_resource(Viewport::new(WIDTH, HEIGHT));
     let root = world.spawn((Layout {
@@ -267,6 +270,11 @@ fn app() -> App {
         gap: 12.0,
         ..Layout::column()
     },));
+    // Match the native renderer's entire window to the chosen semantic palette.
+    // A transparent root otherwise exposes its dark clear behind light-theme text.
+    let theme = world.resource::<UiTheme>().unwrap();
+    world.insert(root, theme.color(rndr_ui::Token::Canvas));
+    world.get_mut::<Layout>(root).unwrap().padding = 12.0;
     rndr_ui::text(
         world,
         root,
@@ -370,9 +378,19 @@ fn settle(app: &mut App) {
         rndr_paint::frame(app);
     }
 }
-fn export(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn export(path: &str, focus: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = app();
     settle(&mut app);
+    if let Some(id) = focus {
+        let view = app.world().resource::<Fixture>().unwrap().liquid;
+        let control = app
+            .world()
+            .get::<rndr_liquid_ui::LiquidView>(view)
+            .and_then(|view| view.control(app.world(), id))
+            .ok_or("unknown --export-focus control ID")?;
+        rndr_core::request_focus(app.world_mut(), control);
+        settle(&mut app);
+    }
     let frame = rndr_paint::frame(&mut app);
     let image = Exporter::new()?.render_frame(
         Some(app.world()),
@@ -426,7 +444,12 @@ fn main() {
         .position(|arg| arg == "--export")
         .and_then(|index| args.get(index + 1))
     {
-        if let Err(error) = export(path) {
+        let focus = args
+            .iter()
+            .position(|arg| arg == "--export-focus")
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str);
+        if let Err(error) = export(path, focus) {
             eprintln!("export: {error}");
             std::process::exit(1);
         }
@@ -447,6 +470,118 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixture_has_explicit_readable_background_and_unclipped_chrome() {
+        let mut app = app();
+        settle(&mut app);
+        let world = app.world();
+        let theme = world.resource::<UiTheme>().unwrap();
+        let root = world
+            .entities_with::<Layout>()
+            .into_iter()
+            .find(|entity| {
+                !world.has::<rndr_core::Parent>(*entity)
+                    && world.get::<Layout>(*entity).is_some_and(|layout| {
+                        layout.width == Size::Fill && layout.height == Size::Fill
+                    })
+            })
+            .unwrap();
+        assert_eq!(
+            world.get::<rndr_core::Color>(root),
+            Some(&theme.color(rndr_ui::Token::Canvas))
+        );
+        let engine = world.resource::<Arc<dyn TextEngine>>().unwrap();
+        for entity in world.entities_with::<Label>() {
+            let label = world.get::<Label>(entity).unwrap();
+            if label.text.starts_with("Liquid + Canvas")
+                || label.text.starts_with("0 / Initial")
+                || label.text.starts_with("Canvas text:")
+                || label.text == "Uncontrolled draft"
+                || label.text == "Host-controlled level"
+            {
+                let rect = world.get::<rndr_core::Rect>(entity).unwrap();
+                let layout = world.get::<Layout>(entity).unwrap();
+                let style = world.get::<rndr_core::TextStyle>(entity).unwrap();
+                let measured =
+                    engine.measure(&label.text, style, &[], rect.w - layout.padding * 2.0);
+                assert!(
+                    measured.height <= rect.h - layout.padding * 2.0 + 0.5,
+                    "clipped {:?}: measured {} in {:?}",
+                    label.text,
+                    measured.height,
+                    rect
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn input_and_slider_are_readable_and_focus_visible_in_both_palettes() {
+        use rndr_core::{Border, Color};
+        use rndr_ui::{Appearance, Token};
+        fn luminance(color: Color) -> f32 {
+            let linear = |value: f32| {
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        }
+        fn contrast(a: Color, b: Color) -> f32 {
+            let a = luminance(a);
+            let b = luminance(b);
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let theme = UiTheme {
+                appearance,
+                ..UiTheme::default()
+            };
+            let mut app = app_with_theme(theme.clone());
+            settle(&mut app);
+            let liquid = app.world().resource::<Fixture>().unwrap().liquid;
+            for id in ["draft", "volume"] {
+                let editor = app
+                    .world()
+                    .get::<rndr_liquid_ui::LiquidView>(liquid)
+                    .unwrap()
+                    .control(app.world(), id)
+                    .unwrap();
+                assert!(rndr_core::request_focus(app.world_mut(), editor));
+                rndr_paint::frame(&mut app);
+                let world = app.world();
+                let fill = *world.get::<Color>(editor).unwrap();
+                let label = world.get::<Label>(editor).unwrap();
+                assert_eq!(fill, theme.color(Token::Content));
+                assert!(contrast(label.color.unwrap(), fill) >= 4.5);
+                let border = world.get::<Border>(editor).unwrap();
+                assert_eq!(border.color, theme.color(Token::Focus));
+                assert_eq!(border.width, theme.focus_width());
+                assert!(contrast(border.color, fill) >= 3.0);
+                let rect = world.get::<rndr_core::Rect>(editor).unwrap();
+                let layout = world.get::<Layout>(editor).unwrap();
+                let style = world.get::<rndr_core::TextStyle>(editor).unwrap();
+                let engine = world.resource::<Arc<dyn TextEngine>>().unwrap();
+                let measured =
+                    engine.measure(&label.text, style, &[], rect.w - 2.0 * layout.padding);
+                assert!(measured.height <= rect.h - 2.0 * layout.padding + 0.5);
+                if id == "volume" {
+                    assert!(
+                        label.text.is_ascii(),
+                        "slider must not rely on optional symbol glyphs"
+                    );
+                    assert!(label.text.ends_with("30.00"));
+                }
+            }
+            let world = app.world();
+            let status = world.resource::<Fixture>().unwrap().status;
+            let color = world.get::<Label>(status).unwrap().color.unwrap();
+            assert!(contrast(color, theme.color(Token::Canvas)) >= 4.5);
+        }
+    }
+
     #[test]
     fn both_slices_share_one_application() {
         headless();

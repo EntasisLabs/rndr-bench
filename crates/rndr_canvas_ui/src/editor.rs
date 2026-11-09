@@ -525,7 +525,12 @@ impl CanvasEditor {
     }
 
     fn history(&mut self, redo: bool) -> bool {
-        self.finish_text();
+        // A refused publication is not an unchanged draft. In particular, a
+        // conflict reloads the snapshot but must not authorize this same
+        // request to traverse another writer's history.
+        if self.publish_text().is_err() {
+            return false;
+        }
         self.cancel_gesture();
         if (redo && !self.current.can_redo) || (!redo && !self.current.can_undo) {
             return false;
@@ -767,17 +772,25 @@ impl CanvasEditor {
     }
 
     /// Saves the text being edited. Empty text removes a node created by the
-    /// edit, or deletes an existing one.
+    /// edit, or deletes an existing one. Returns true only for a publication;
+    /// unchanged drafts and refusals return false (see [`Self::last_error`]).
     pub fn finish_text(&mut self) -> bool {
+        self.publish_text().unwrap_or(false)
+    }
+
+    /// Preserve refusal separately from an unchanged/absent draft so history
+    /// can stop at the publication boundary. Conflict settlement drops the
+    /// disposable draft, reloads the store and retains the error for the host.
+    fn publish_text(&mut self) -> Result<bool, CanvasError> {
         let Some(edit) = self.text.take() else {
-            return false;
+            return Ok(false);
         };
         let empty =
             matches!(&edit.node.content, Content::Text { text, .. } if text.trim().is_empty());
-        match (empty, &edit.original) {
-            (true, None) => false,
+        let done = match (empty, &edit.original) {
+            (true, None) => return Ok(false),
             (true, Some(_)) => self.commit("Delete text", vec![Operation::remove(edit.id)]),
-            (false, Some(original)) if *original == edit.node => false,
+            (false, Some(original)) if *original == edit.node => return Ok(false),
             (false, original) => {
                 let label = if original.is_some() {
                     "Edit text"
@@ -791,6 +804,13 @@ impl CanvasEditor {
                 }
                 done
             }
+        };
+        if done {
+            Ok(true)
+        } else {
+            // Every publication above submits a nonempty transaction; commit
+            // records the exact store refusal when it returns false.
+            Err(self.last_error.clone().expect("refused text publication"))
         }
     }
 
@@ -870,7 +890,6 @@ impl CanvasEditor {
                     self.finish_text();
                     changed = true;
                 } else if mods.primary && matches!(key, Key::Char('z' | 'y')) {
-                    self.finish_text();
                     changed |= if key == Key::Char('y') || mods.shift {
                         self.redo()
                     } else {

@@ -178,16 +178,18 @@ impl App {
     }
 
     /// Inbox, ready task, due timer, or a [`crate::feed`] value waiting to be
-    /// delivered. The runner requests a redraw when this is set.
+    /// delivered, or markdown projection work waiting to settle. The runner
+    /// requests a redraw when this is set.
     pub fn wants_frame(&self) -> bool {
-        runtime::wants_frame(self.world()) || crate::live::pending(self.world())
+        self.wants_update() || crate::live::pending(self.world())
     }
 
     /// Some reason for a frame other than a [`crate::Live`] value: queued
-    /// work, a due timer, motion or an animated effect. Without one, and
+    /// work, a due timer, motion, an animated effect or pending markdown sync.
+    /// Without one, and
     /// without new platform input, [`Self::update_live`] is enough.
     pub fn wants_update(&self) -> bool {
-        runtime::wants_frame(self.world())
+        runtime::wants_frame(self.world()) || crate::markdown::pending(self.world())
     }
 
     /// Live-only frame: tick [`crate::Time`] and copy bound [`crate::Live`]

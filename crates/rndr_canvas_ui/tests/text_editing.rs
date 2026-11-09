@@ -494,6 +494,207 @@ fn early_keyboard_claim_precedes_chrome_and_tab_returns_to_focus_traversal() {
     assert_eq!(app.world().resource::<Focus>().unwrap().entity, Some(other));
 }
 
+fn view_rig() -> (World, rndr_core::Entity) {
+    let (editor, engine) = rig("abc");
+    let mut world = World::new();
+    let slot = world.spawn((Layout::column(), SurfaceSlot { id: 7 }));
+    world.insert(
+        slot,
+        UiRect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        },
+    );
+    world.insert_resource(engine);
+    view::install(&mut world, CanvasView::new(editor, 7));
+    world
+        .resource_mut::<CanvasView>()
+        .unwrap()
+        .editor
+        .edit_text("text");
+    assert!(view::focus(&mut world));
+    (world, slot)
+}
+
+#[test]
+fn disabled_view_refuses_direct_and_reserved_input_even_with_stale_focus() {
+    for (reserve, observe_focus) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (mut world, slot) = view_rig();
+        if observe_focus {
+            view::update(&mut world);
+        }
+        world.insert_resource(Input {
+            keys: vec![KeyEvent::character('x', rndr_core::Modifiers::default())],
+            chars: "x".into(),
+            ..Input::default()
+        });
+        if reserve {
+            view::take_keyboard(&mut world);
+            assert!(world.resource::<Input>().unwrap().keys.is_empty());
+        }
+        world.insert(slot, rndr_core::ControlDisabled);
+        assert!(!rndr_core::access_details(&world, slot).focus);
+        assert_eq!(world.resource::<Focus>().unwrap().entity, Some(slot));
+        view::take_keyboard(&mut world);
+        view::update(&mut world);
+        let editor = &world.resource::<CanvasView>().unwrap().editor;
+        assert_eq!(text(editor), "abc");
+        assert_eq!(editor.mutation().document.revision, 0);
+        assert!(editor.editing_text().is_none());
+        assert!(!world.has::<rndr_core::CapturesKeys>(slot));
+        if !reserve {
+            assert_eq!(world.resource::<Input>().unwrap().chars, "x");
+            assert_eq!(world.resource::<Input>().unwrap().keys.len(), 1);
+        }
+        // Shortcut input must also remain unconsumed and cannot manipulate objects.
+        world.insert_resource(Input {
+            keys: vec![KeyEvent::named(
+                NamedKey::Delete,
+                rndr_core::Modifiers::default(),
+            )],
+            ..Input::default()
+        });
+        view::take_keyboard(&mut world);
+        view::update(&mut world);
+        assert_eq!(text(&world.resource::<CanvasView>().unwrap().editor), "abc");
+        assert_eq!(world.resource::<Input>().unwrap().keys.len(), 1);
+        world.remove::<rndr_core::ControlDisabled>(slot);
+        world.insert_resource(Input::default());
+        view::update(&mut world);
+        assert_eq!(
+            text(&world.resource::<CanvasView>().unwrap().editor),
+            "abc",
+            "reserved input is not replayed after re-enabling"
+        );
+    }
+}
+
+#[test]
+fn physical_history_chords_use_platform_contract_in_and_after_text_editing() {
+    for platform in [
+        Platform::Mac,
+        Platform::Windows,
+        Platform::X11,
+        Platform::Wayland,
+    ] {
+        let (mut world, _) = view_rig();
+        world.insert_resource(platform);
+        world.insert_resource(Input {
+            keys: vec![KeyEvent::character('x', rndr_core::Modifiers::default())],
+            ..Input::default()
+        });
+        view::update(&mut world);
+        assert_eq!(
+            text(&world.resource::<CanvasView>().unwrap().editor),
+            "abcx"
+        );
+        let mods = rndr_core::Modifiers {
+            super_key: platform.primary_is_super(),
+            ctrl: !platform.primary_is_super(),
+            ..rndr_core::Modifiers::default()
+        };
+        let undo = KeyEvent::character('я', mods).with_code(KeyCode::letter('z').unwrap());
+        assert_eq!(
+            rndr_core::standard_action(platform, &undo),
+            Some(rndr_core::EditAction::Undo)
+        );
+        world.insert_resource(Input {
+            keys: vec![undo.clone()],
+            ..Input::default()
+        });
+        view::take_keyboard(&mut world);
+        view::update(&mut world);
+        assert_eq!(text(&world.resource::<CanvasView>().unwrap().editor), "abc");
+        assert!(world
+            .resource::<CanvasView>()
+            .unwrap()
+            .editor
+            .editing_text()
+            .is_none());
+        let redo_z = KeyEvent::character(
+            'я',
+            rndr_core::Modifiers {
+                shift: true,
+                ..mods
+            },
+        )
+        .with_code(KeyCode::letter('z').unwrap());
+        let mut redos = vec![redo_z];
+        if !platform.primary_is_super() {
+            redos.push(KeyEvent::character('н', mods).with_code(KeyCode::letter('y').unwrap()));
+        }
+        let revision = world
+            .resource::<CanvasView>()
+            .unwrap()
+            .editor
+            .mutation()
+            .document
+            .revision;
+        let mut refused = vec![
+            KeyEvent::character('z', rndr_core::Modifiers { alt: true, ..mods }),
+            KeyEvent::character(
+                'z',
+                rndr_core::Modifiers {
+                    ctrl: true,
+                    super_key: true,
+                    ..mods
+                },
+            ),
+            undo.clone().released(),
+            undo.clone().synthetic(),
+            KeyEvent::character(
+                'z',
+                rndr_core::Modifiers {
+                    shift: true,
+                    ..mods
+                },
+            )
+            .synthetic(),
+        ];
+        if platform.primary_is_super() {
+            refused.push(KeyEvent::character('y', mods));
+        }
+        for event in refused {
+            world.insert_resource(Input {
+                keys: vec![event],
+                ..Input::default()
+            });
+            view::update(&mut world);
+            let editor = &world.resource::<CanvasView>().unwrap().editor;
+            assert_eq!(text(editor), "abc");
+            assert_eq!(
+                editor.mutation().document.revision,
+                revision,
+                "refused/released/synthetic history must not execute"
+            );
+        }
+        for redo in redos {
+            assert_eq!(
+                rndr_core::standard_action(platform, &redo),
+                Some(rndr_core::EditAction::Redo)
+            );
+            world.insert_resource(Input {
+                keys: vec![redo],
+                ..Input::default()
+            });
+            view::update(&mut world);
+            assert_eq!(
+                text(&world.resource::<CanvasView>().unwrap().editor),
+                "abcx",
+                "physical redo after leaving text editing on {platform:?}"
+            );
+            world.insert_resource(Input {
+                keys: vec![undo.clone()],
+                ..Input::default()
+            });
+            view::update(&mut world);
+            assert_eq!(text(&world.resource::<CanvasView>().unwrap().editor), "abc");
+        }
+    }
+}
+
 #[test]
 fn unchanged_and_locked_text_respect_existing_document_authority() {
     let (mut editor, _) = rig("hello");

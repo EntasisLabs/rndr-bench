@@ -69,7 +69,9 @@ impl LiquidView {
 }
 
 /// Spawn a scrolling markdown view of Liquid `source`. Parent it like any
-/// [`markdown_view`].
+/// [`markdown_view`]. Duplicate IDs are displayed independently; the first
+/// occurrence owns the public ID and is eligible for retention on an incremental
+/// update. Later occurrences are retired, never aliased to that first control.
 pub fn liquid_view(world: &mut World, source: &str) -> Entity {
     let parsed = LiquidDocument::parse_with_metadata(source);
     let doc = parsed.document;
@@ -85,7 +87,8 @@ pub fn liquid_view(world: &mut World, source: &str) -> Entity {
 }
 
 /// Replace the whole source of a Liquid view. Every mounted block is rebuilt
-/// on the next frame; block state such as the open tab is reset.
+/// on the next frame; block state such as the open tab is reset. Duplicate IDs
+/// follow the same first-occurrence identity rule as [`liquid_view`].
 pub fn set_liquid_source(world: &mut World, view: Entity, source: &str) {
     let parsed = LiquidDocument::parse_with_metadata(source);
     let doc = parsed.document;
@@ -184,17 +187,23 @@ pub fn update_liquid_source(
     Ok(UpdateStatus::Applied)
 }
 
-fn identities(blocks: &[LiquidBlock], ids: &[Option<String>]) -> Vec<String> {
+fn identities(blocks: &[LiquidBlock], ids: &[Option<String>]) -> Vec<(String, usize)> {
     let mut ordinals = std::collections::HashMap::new();
+    let mut occurrences = std::collections::HashMap::new();
     blocks
         .iter()
         .enumerate()
         .map(|(index, block)| {
             if let Some(id) = ids.get(index).and_then(|id| id.as_ref()) {
-                return format!("id:{id}");
+                // Construction/reset accept arbitrary documents. Keep every
+                // occurrence distinct so only the first can match a unique ID.
+                let occurrence = occurrences.entry(id).or_insert(0usize);
+                let key = (format!("id:{id}"), *occurrence);
+                *occurrence += 1;
+                return key;
             }
             let ordinal = ordinals.entry(block.kind()).or_insert(0usize);
-            let key = format!("anonymous:{}:{}", block.kind(), ordinal);
+            let key = (format!("anonymous:{}", block.kind()), *ordinal);
             *ordinal += 1;
             key
         })

@@ -49,6 +49,36 @@ fn type_text(app: &mut App, entity: Entity, text: &str) {
 }
 
 #[test]
+fn duplicate_initial_and_reset_ids_never_retain_orphan_fields_or_focus() {
+    for reset in [false, true] {
+        let duplicate = format!("{INPUT}\n{INPUT}");
+        let (mut app, view) = setup(if reset { INPUT } else { &duplicate });
+        if reset {
+            set_liquid_source(app.world_mut(), view, &duplicate);
+            frames(&mut app);
+        }
+        let first = control(&app, view, "input");
+        let fields = app.world().entities_with::<TextField>();
+        assert_eq!(fields.len(), 2);
+        let second = fields.into_iter().find(|entity| *entity != first).unwrap();
+        assert!(request_focus(app.world_mut(), second));
+        update_liquid_source(app.world_mut(), view, INPUT).unwrap();
+        frames(&mut app);
+        assert_eq!(control(&app, view, "input"), first);
+        assert_eq!(app.world().entities_with::<TextField>(), vec![first]);
+        assert!(!app.world().is_alive(second));
+        assert_ne!(
+            app.world().resource::<Focus>().unwrap().entity,
+            Some(second)
+        );
+        update_liquid_source(app.world_mut(), view, "Empty").unwrap();
+        frames(&mut app);
+        assert!(app.world().entities_with::<TextField>().is_empty());
+        assert!(!app.world().is_alive(first));
+    }
+}
+
+#[test]
 fn stream_and_reorder_keep_editor_identity_focus_selection_and_local_values() {
     let (mut app, view) = setup(&all());
     let check = control(&app, view, "check");
@@ -153,6 +183,94 @@ fn slider_user_changes_respect_admission_and_controlled_host_values() {
     assert!(events::<LiquidControlChanged>(app.world()).is_empty());
     frames(&mut app);
     assert_eq!(control(&app, view, "slider"), slider);
+}
+
+// Model the native runner: the input event buys one frame, then only
+// authoritative pending work can schedule another full update.
+fn drain_idle(app: &mut App) {
+    for _ in 0..16 {
+        if !app.wants_frame() {
+            assert!(!app.wants_update());
+            return;
+        }
+        assert!(app.wants_update(), "markdown settling needs a full update");
+        rndr_paint::frame(app);
+    }
+    panic!("Liquid lifecycle did not return to idle");
+}
+
+fn assert_no_slot_labels(app: &App) {
+    for entity in app.world().entities_with::<Label>() {
+        assert!(
+            !app.world()
+                .get::<Label>(entity)
+                .unwrap()
+                .text
+                .contains('\u{e001}'),
+            "raw Liquid slot marker remains after the runner went idle"
+        );
+    }
+}
+
+#[test]
+fn reset_settles_without_another_input_event() {
+    let (mut app, view) = setup(INPUT);
+    drain_idle(&mut app);
+    let input = control(&app, view, "input");
+    let source = format!("Before\n\n{CHECK}\n{INPUT}\nAfter");
+    update_liquid_source(app.world_mut(), view, &source).unwrap();
+    rndr_paint::frame(&mut app);
+    drain_idle(&mut app);
+    assert_no_slot_labels(&app);
+    assert_eq!(control(&app, view, "input"), input);
+
+    // The reset is performed during the event's Update, just like the fixture.
+    app.add_system(Schedule::Update, |world: &mut World| {
+        let reset = world
+            .resource_mut::<ResetSource>()
+            .and_then(|source| source.0.take());
+        if let Some((view, source)) = reset {
+            set_liquid_source(world, view, &source);
+        }
+    });
+    app.world_mut()
+        .insert_resource(ResetSource(Some((view, INPUT.into()))));
+    rndr_paint::frame(&mut app);
+    drain_idle(&mut app);
+    assert_no_slot_labels(&app);
+    assert!(!app.world().is_alive(input));
+    assert_eq!(
+        control_value(app.world(), control(&app, view, "input")),
+        Some(LiquidValue::Text("Initial".into()))
+    );
+}
+
+struct ResetSource(Option<(Entity, String)>);
+
+#[test]
+fn nested_mounts_and_refresh_settle_without_input_or_frame_pumping() {
+    let source = format!("```report\nid: report\ntitle: Nested\nOpening\n{INPUT}\nClosing\n```\n");
+    let mut app = App::new();
+    app.add_plugin(UiPlugin);
+    app.add_plugin(MarkdownPlugin);
+    app.add_plugin(LiquidUiPlugin::new(Host));
+    app.world_mut().insert_resource(Viewport::new(800., 1800.));
+    let view = liquid_view(app.world_mut(), &source);
+    rndr_paint::frame(&mut app);
+    drain_idle(&mut app);
+    assert_no_slot_labels(&app);
+    let input = control(&app, view, "input");
+    refresh(app.world_mut());
+    rndr_paint::frame(&mut app);
+    drain_idle(&mut app);
+    assert_no_slot_labels(&app);
+    assert_eq!(control(&app, view, "input"), input);
+    set_liquid_source(app.world_mut(), view, &source);
+    rndr_paint::frame(&mut app);
+    drain_idle(&mut app);
+    assert_no_slot_labels(&app);
+    assert!(!app.world().is_alive(input));
+    assert_ne!(control(&app, view, "input"), input);
 }
 
 #[test]

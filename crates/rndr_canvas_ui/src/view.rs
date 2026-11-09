@@ -28,7 +28,6 @@ pub struct CanvasView {
     /// The [`SurfaceSlot`] id the canvas is laid out in.
     pub slot: u64,
     captured: bool,
-    focused: bool,
     pending_input: Option<Input>,
     wheel: [f32; 2],
 }
@@ -42,7 +41,6 @@ impl CanvasView {
             backdrop: Color::rgb(0.976, 0.98, 0.984),
             slot,
             captured: false,
-            focused: false,
             pending_input: None,
             wheel: [0.0, 0.0],
         }
@@ -117,6 +115,42 @@ fn key(logical: &LogicalKey) -> Option<Key> {
         LogicalKey::Character(c) => Key::Char(c.to_ascii_lowercase()),
         _ => return None,
     })
+}
+
+// Resolve native history before discarding physical-key information. The
+// editor's compact input is platform-neutral; core owns native chord policy.
+fn native_key(
+    event: &rndr_core::KeyEvent,
+    platform: rndr_core::Platform,
+) -> Option<(Key, Modifiers)> {
+    if event.released || event.synthetic {
+        return None;
+    }
+    let mut mods = Modifiers {
+        shift: event.modifiers.shift,
+        alt: event.modifiers.alt,
+        primary: event.modifiers.primary(platform),
+    };
+    let key = match rndr_core::standard_action(platform, event) {
+        Some(rndr_core::EditAction::Undo) => {
+            mods.shift = false;
+            Key::Char('z')
+        }
+        Some(rndr_core::EditAction::Redo) => {
+            mods.shift = true;
+            Key::Char('z')
+        }
+        _ => {
+            let key = key(&event.logical)?;
+            // Do not let the compact editor reinterpret a history-looking
+            // chord that core refused (Alt, mixed primary modifiers, Cmd+Y).
+            if mods.primary && matches!(key, Key::Char('z' | 'y')) {
+                return None;
+            }
+            key
+        }
+    };
+    Some((key, mods))
 }
 
 /// Builds this frame's [`EditorInput`] from the world. The pointer counts
@@ -223,19 +257,7 @@ pub fn editor_input(world: &World, rect: Rect, captured: bool) -> EditorInput {
         keys: input
             .keys
             .iter()
-            .filter(|e| !e.released)
-            .filter_map(|e| {
-                key(&e.logical).map(|k| {
-                    (
-                        k,
-                        Modifiers {
-                            shift: e.modifiers.shift,
-                            alt: e.modifiers.alt,
-                            primary: e.modifiers.primary(platform),
-                        },
-                    )
-                })
-            })
+            .filter_map(|e| native_key(e, platform))
             .collect(),
         text: if modifiers.primary {
             String::new()
@@ -318,11 +340,17 @@ pub fn take_keyboard(world: &mut World) {
                 && e.logical == LogicalKey::Named(NamedKey::Tab)
         });
     if tab || input.key == Some(rndr_core::Key::Tab) && input.ime_preedit.is_empty() {
-        world
-            .resource_mut::<CanvasView>()
-            .unwrap()
-            .editor
-            .finish_text();
+        let editor = &mut world.resource_mut::<CanvasView>().unwrap().editor;
+        if editor.editing_text().is_some() {
+            // Tab exits before normal native adaptation so traversal remains
+            // unconsumed. Its batch may still carry accepted IME text, which
+            // belongs to this draft, not the field that receives focus next.
+            editor.accept_ime_commit(&input.ime_commit);
+            editor.finish_text();
+            if let Some(input) = world.resource_mut::<Input>() {
+                input.ime_commit.clear();
+            }
+        }
         world.remove::<rndr_core::CapturesKeys>(entity);
         return;
     }
@@ -357,19 +385,7 @@ pub fn update(world: &mut World) {
     input.keys = native
         .keys
         .iter()
-        .filter(|e| !e.released)
-        .filter_map(|e| {
-            key(&e.logical).map(|k| {
-                (
-                    k,
-                    Modifiers {
-                        shift: e.modifiers.shift,
-                        alt: e.modifiers.alt,
-                        primary: e.modifiers.primary(platform),
-                    },
-                )
-            })
-        })
+        .filter_map(|e| native_key(e, platform))
         .collect();
     input.text = if input.modifiers.primary {
         String::new()
@@ -396,10 +412,12 @@ pub fn update(world: &mut World) {
         return;
     };
     view.editor.set_text_engine(engine);
-    if (view.focused || blurred) && !owns_focus {
+    // Admission is checked at consumption, not inferred from an earlier focus
+    // observation or queue reservation. This also retires drafts started and
+    // disabled before the first adapter update.
+    if !owns_focus {
         view.editor.finish_text();
     }
-    view.focused = owns_focus;
     if !owns_focus
         || view
             .editor
@@ -412,6 +430,7 @@ pub fn update(world: &mut World) {
     input.scroll[0] += wheel[0];
     input.scroll[1] += wheel[1];
     if !admitted || blurred {
+        view.captured = false;
         input.pointer = None;
         input.scroll = [0.0, 0.0];
     }

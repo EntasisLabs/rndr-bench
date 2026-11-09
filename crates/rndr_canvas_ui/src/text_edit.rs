@@ -103,6 +103,14 @@ pub(crate) fn key(edit: &mut TextEdit, key: Key, mods: Modifiers, engine: &dyn T
 }
 
 impl CanvasEditor {
+    /// Accept committed text before an adapter boundary retires the draft.
+    /// Preedit is deliberately not part of this publication input.
+    pub(crate) fn accept_ime_commit(&mut self, commit: &str) {
+        if let Some(edit) = &mut self.text {
+            insert(edit, commit);
+        }
+    }
+
     /// Native text input adapter. Uses core's composition filtering, shortcut
     /// table and grapheme-safe editing, and the runner-owned clipboard resource.
     /// Returns false when no text draft owns input. Call instead of replaying
@@ -120,10 +128,13 @@ impl CanvasEditor {
         }
         let frame = rndr_core::text_frame(input);
         self.text.as_mut().unwrap().preedit = frame.preedit.clone();
+        // A commit is already accepted text, unlike cancellable preedit. Apply
+        // it exactly once before any action can publish/retire this session
+        // (Escape, primary Enter, Undo or Redo in the same native batch).
+        self.accept_ime_commit(&frame.commit);
         // The composing input method owns navigation/shortcuts until commit or
         // cancellation. A commit may arrive alongside the next preedit.
         if !frame.preedit.is_empty() {
-            insert(self.text.as_mut().unwrap(), &frame.commit);
             return true;
         }
         for event in &frame.keys {
@@ -136,7 +147,6 @@ impl CanvasEditor {
                     if !frame.preedit.is_empty() {
                         continue;
                     }
-                    self.finish_text();
                     if action == Some(EditAction::Undo) {
                         self.undo();
                     } else {
@@ -262,9 +272,6 @@ impl CanvasEditor {
                 return true;
             }
             insert(self.text.as_mut().unwrap(), &frame.chars);
-        }
-        if !frame.commit.is_empty() {
-            insert(self.text.as_mut().unwrap(), &frame.commit);
         }
         true
     }

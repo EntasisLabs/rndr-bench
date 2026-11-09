@@ -559,6 +559,24 @@ fn theme_for(world: &World) -> MarkdownTheme {
         .unwrap_or_else(|| MarkdownTheme::from_theme(&theme_of(world)))
 }
 
+// A host may mount after PostUpdate's markdown sync (Liquid does), and
+// nested markdown may be created while mounting it. Keep the event-driven
+// runner awake until source, bindings and measured host heights are published.
+// This is full-update work, never a live-only repaint.
+pub(crate) fn pending(world: &World) -> bool {
+    world
+        .entities_with::<MarkdownView>()
+        .into_iter()
+        .any(|entity| {
+            world.get::<MarkdownView>(entity).is_some_and(|view| {
+                view.dirty
+                    || view.hosts_dirty
+                    || host::stale(world, view)
+                    || host::needs_measure(world, view)
+            })
+        })
+}
+
 fn markdown_sync(world: &mut World) {
     let ids = world.entities_with::<MarkdownView>();
     for entity in ids {

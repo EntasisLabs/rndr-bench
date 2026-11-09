@@ -268,6 +268,15 @@ pub(super) fn measure_hosts(world: &World, doc: &mut MarkdownView) {
     }
 }
 
+// Layout runs after markdown sync, so a measured subtree can acquire a new
+// height after the last publication even when no platform input follows it.
+pub(super) fn needs_measure(world: &World, doc: &MarkdownView) -> bool {
+    doc.hosts.iter().any(|binding| {
+        binding.measured
+            && content_height(world, binding.root).is_some_and(|height| height != binding.height)
+    })
+}
+
 fn content_height(world: &World, root: Entity) -> Option<f32> {
     let children = crate::children_of(world, root);
     if children.is_empty() {

@@ -36,7 +36,7 @@ ellipse (`O`), line (`L`), arrow (`A`), text (`T`) and frame (`F`).
   points it touches.
 - Pan with the hand tool, the middle button or the wheel; zoom with the
   primary modifier (Ctrl, or Cmd on macOS) and the wheel.
-- Keys: undo `Mod+Z`, redo `Mod+Shift+Z`/`Mod+Y`, duplicate `Mod+D`,
+- Keys: undo `Mod+Z`, redo `Mod+Shift+Z` (also `Ctrl+Y` on Windows/Linux), duplicate `Mod+D`,
   group `Mod+G`, ungroup `Mod+Shift+G`, select all `Mod+A`, delete
   `Delete`/`Backspace`, layer order `]`/`[`, nudge with arrows (shift for
   10), `Escape` cancels a gesture, then clears the selection, then leaves
@@ -91,14 +91,35 @@ is one existing `CanvasStore` transaction; an unchanged draft is no transaction.
 Document undo/redo therefore crosses text edits and object gestures. Primary+Z
 while editing commits and undoes that complete session, then exits editing;
 there is no separate per-keystroke undo history. Store failures remain observable
-through `last_error`; conflicts follow the existing reload policy.
+through `last_error`; conflicts follow the existing reload policy. Both Undo and
+Redo stop if publishing the pending text draft is refused: the triggering request
+never traverses history on the newly reloaded snapshot. The disposable draft is
+retired, the exact conflict remains in `last_error`, and the other writer's
+transaction and history flags remain intact. A subsequent deliberate history
+request may operate on the refreshed snapshot. Unchanged drafts are not refusals.
+All input routes (direct methods, `EditorInput`, native adapter) share this gate.
+
+An IME commit is accepted text, not cancellable preedit: the adapter inserts it
+exactly once before processing exit or history actions in the same input batch.
+Escape/primary+Enter therefore save that commit; Undo can undo it as part of the
+session and Redo can restore it. While preedit is nonempty, the IME retains key
+ownership and only committed text changes the draft; preedit itself is never saved.
 
 `view::take_wheel` now reserves the focused canvas keyboard queue too; keep it
 at the front of `Schedule::Input`, before Chrome/global keymaps. Alternatively,
 register `view::take_keyboard` there when no wheel interception is needed.
 `view::update` consumes the reserved queue once, never stealing input when a
 foreign control has focus. Tab is left for native focus traversal after the text
-draft is committed. While editing, the surface carries `CapturesKeys`, which
+draft is committed. Both reservation and direct/pre-Chrome consumption require
+current canonical focus eligibility (`access_details(...).focus`), not just a
+stale `Focus` entity. Losing eligibility commits the previously accepted draft
+once and releases editing/capture; queued input is discarded rather than replayed
+when re-enabled. A refused direct queue remains available to its owner. Native
+Undo/Redo use core's platform shortcut resolver even after text editing exits,
+including physical Z/Y with non-Latin logical characters. Released/synthetic
+keys and history chords rejected by core are not reinterpreted as history by the
+compact editor. The low-level `EditorInput` API remains platform-neutral.
+While editing, the surface carries `CapturesKeys`, which
 also enables the desktop runner's existing IME route. Direct headless/native
 adapters can call `handle_native_text(&Input, Platform, &mut Clipboard)` instead
 of replaying those same keys through `handle`.

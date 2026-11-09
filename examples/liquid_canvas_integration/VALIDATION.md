@@ -46,3 +46,44 @@ Environment: assigned `medousa` checkout; setup sourced from
 - Git read commands were rejected by the runtime's shared hazardous-resource claim
   guard, despite being read-only. No Git mutations, commits, staging or reference
   changes were attempted. Final combined diff/status review remains with the host.
+
+## Actual review a22dfd0: duplicate IDs and legibility follow-up
+
+The preceding entries are historical; this section records the follow-up run.
+This worker changed only `rndr_liquid_ui` and this fixture, preserving previous
+working-tree changes. `BENCHMARK_REPORT.md` remains owned by the integrating host.
+
+- `cargo test -p rndr_liquid_ui --test reconcile duplicate_initial_and_reset_ids -- --nocapture`:
+  first reproduced an identity mismatch (the later duplicate survived instead of
+  the first); after occurrence-qualified keys, construction and intentional reset
+  both retain only the first field on a unique-ID update, retire the duplicate,
+  clear its focus, and retire all fields on removal. Incremental duplicates still
+  refuse atomically. Public identity remains first-occurrence-wins.
+- `cargo test -p liquid_canvas_integration fixture_has_explicit_readable_background -- --nocapture`:
+  first failed because the root had no explicit fill, exposing the renderer's
+  dark clear behind light-theme text. The root now uses semantic `Canvas` fill;
+  inputs/slider use semantic `Content`/`Text`, content-metric wrapping labels,
+  visible theme-derived focus borders, and an ASCII slider track rather than
+  optional box-drawing/symbol glyphs.
+- `cargo test -p rndr_liquid_ui -p liquid_canvas_integration`: **26 passed** on
+  the final observed tree (7 fixture, 18 Liquid integration including the host's
+  concurrent idle-reset review regression, 1 doctest). No failures/ignores.
+  Bundled Parley-font tests measure header/status/control text fit and assert
+  light/dark input/slider contrast >= 4.5:1 and focused borders >= 3:1.
+- `cargo clippy -p rndr_liquid_ui -p liquid_canvas_integration --all-targets --no-deps -- -D warnings`:
+  **passed**. Scoped formatting and `git diff --check` also passed.
+- `cargo run -p liquid_canvas_integration -- --export /tmp/medousa-review-initial.png`
+  and matching exports `/tmp/medousa-review-input-focus.png --export-focus draft`
+  and `/tmp/medousa-review-slider-focus.png --export-focus volume`: **passed**,
+  three real-renderer 1500 x 960 offscreen PNGs. Ephemeral artifacts stay outside
+  the source tree. These commands reuse the bundled native text engine.
+- Numeric PNG inspection using Python standard-library PNG decoding confirmed
+  corner/root RGB `(244,245,247)` and 413,013 semantic-canvas pixels in all three
+  exports. Focus RGB `(0,95,204)` pixel counts were 0 / 2,040 / 2,000; changed
+  bounds were input `(28,422)-(496,458)` and slider `(28,490)-(496,526)`,
+  respectively. These are offscreen pixel/layout checks, **not human visual review**.
+- `timeout 8s target/debug/liquid_canvas_integration`: **blocked**, exit 101:
+  event loop `NotSupported`, neither WAYLAND_DISPLAY, WAYLAND_SOCKET nor DISPLAY
+  is set. No `xvfb-run` or local-image visual inspection capability was available.
+  A real desktop human review of appearance/focus/slider remains needed; no live
+  language-IME, native clipboard or accessibility certification is claimed.
