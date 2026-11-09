@@ -1,0 +1,29 @@
+{
+  "benchmark": "rndr production integration: stateful Liquid and editable Canvas",
+  "run_date": "2026-11-08",
+  "source_repository": "https://github.com/EntasisLabs/rndr",
+  "baseline": "b2a1c214cb9856a73efca25000a0fa5bf51c1b25",
+  "baseline_branch": "benchmarks/2026-11-08/baseline",
+  "results": {
+    "medousa": {
+      "branch": "benchmarks/2026-11-08/medousa",
+      "commit": "a22dfd015a7dcdfb742926cc8269c547d7180aab",
+      "commits_above_baseline": 3,
+      "working_tree_clean_at_archive": true
+    },
+    "hermes": {
+      "branch": "benchmarks/2026-11-08/hermes",
+      "commit": "d73ace95f5293da4d97aa8d34fbab5d83d3ad8a2",
+      "commits_above_baseline": 6,
+      "working_tree_clean_at_archive": true
+    },
+    "pi": {
+      "branch": "benchmarks/2026-11-08/pi",
+      "commit": "bf3fe589411ab3421c5e7a50cb6e22ae4621ba32",
+      "commits_above_baseline": 4,
+      "working_tree_clean_at_archive": true
+    }
+  },
+  "review_status": "Archived only; independent implementation review pending. Reports are agent claims, not coordinator validation.",
+  "model_budget_timing": "Not captured in this archive; do not infer equal budgets or rank by commit count."
+}
