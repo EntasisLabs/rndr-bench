@@ -256,6 +256,7 @@ fn typing_creates_text_and_double_click_edits_it() {
     rig.click(at, NONE);
     rig.click(at, NONE);
     assert!(rig.editor.editing_text().is_some());
+    assert_eq!(rig.editor.text_selection(), Some((0, 0)));
     rig.editor.handle(
         &EditorInput {
             text: "!".into(),
@@ -265,7 +266,7 @@ fn typing_creates_text_and_double_click_edits_it() {
         &EstimateMeasure,
     );
     rig.key(Key::Escape, NONE);
-    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "Hi!"));
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "!Hi"));
 }
 
 #[test]
@@ -383,4 +384,63 @@ fn text_selection_replacement_graphemes_and_transaction_history() {
     assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "ab🇫🇷cd"));
     assert!(rig.editor.redo());
     assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "abXd"));
+}
+
+#[test]
+fn pointer_selection_tracks_rotated_text_through_camera_and_commits_once() {
+    let mut rig = Rig::new();
+    let node = Node::new(
+        "text",
+        Content::Text {
+            text: "abcdef".into(),
+            color: "#000".into(),
+            font_family: "Inter".into(),
+            font_size: 20.0,
+            font_weight: None,
+            font_style: None,
+        },
+        Transform {
+            x: 100.0,
+            y: 100.0,
+            width: 100.0,
+            height: 30.0,
+            rotation: 30.0,
+        },
+    );
+    assert!(rig
+        .editor
+        .commit("fixture", vec![Operation::put(node.clone())]));
+    rig.editor.camera.zoom = 2.0;
+    let point = |column: f64, editor: &CanvasEditor| {
+        let nodes = editor.nodes();
+        let index = SceneIndex::with_measure(&nodes, &EstimateMeasure);
+        let node = index.get("text").unwrap();
+        let scene = index
+            .world_matrix(node)
+            .apply(Vec2::new(1.2 + column * 12.0, 8.0));
+        let view = editor.camera.scene_to_view(scene);
+        [view.x as f32, view.y as f32]
+    };
+    let at = point(2.0, &rig.editor);
+    rig.click(at, NONE);
+    rig.click(at, NONE);
+    assert_eq!(rig.editor.text_selection(), Some((2, 2)));
+    let revision = rig.editor.mutation().document.revision;
+    let end = point(4.0, &rig.editor);
+    rig.drag(at, end, NONE);
+    assert_eq!(rig.editor.text_selection(), Some((4, 2)));
+    assert_eq!(rig.editor.mutation().document.revision, revision);
+    rig.editor.handle(
+        &EditorInput {
+            text: "X".into(),
+            ..EditorInput::default()
+        },
+        &EstimateMeasure,
+    );
+    rig.key(Key::Escape, NONE);
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "abXef"));
+    assert!(rig.editor.undo());
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "abcdef"));
+    assert!(rig.editor.redo());
+    assert!(matches!(&rig.nodes()[0].content, Content::Text { text, .. } if text == "abXef"));
 }

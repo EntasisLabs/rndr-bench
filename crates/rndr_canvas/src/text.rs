@@ -7,6 +7,29 @@ use crate::schema::{Content, FontStyle, Node, TextAlign, TextLayout, TextSpan};
 pub trait TextMeasure {
     fn width(&self, line: &str, font: &Font<'_>) -> f64;
 
+    /// Hit-test one already-wrapped line, returning a UTF-8 byte boundary.
+    /// Native measures should override this with their shaping engine.
+    fn index_at(&self, line: &str, font: &Font<'_>, runs: &[StyledRun], x: f64) -> usize {
+        let mut previous = 0.0;
+        for (at, ch) in line.char_indices() {
+            let end = at + ch.len_utf8();
+            let clipped: Vec<_> = runs
+                .iter()
+                .filter(|r| r.start < end)
+                .map(|r| StyledRun {
+                    end: r.end.min(end),
+                    ..*r
+                })
+                .collect();
+            let next = self.styled_width(&line[..end], font, &clipped);
+            if x < (previous + next) / 2.0 {
+                return at;
+            }
+            previous = next;
+        }
+        line.len()
+    }
+
     /// Width of `line` where `runs` (sorted, non-overlapping) change the
     /// weight or style of `font`. The default measures each piece on its own;
     /// a shaper should measure the line as one styled run.
@@ -101,6 +124,63 @@ pub fn layout_node(node: &Node, measure: &dyn TextMeasure) -> Option<TextBox> {
         style: font_style.unwrap_or(FontStyle::Normal),
     };
     Some(layout_text(text, &font, node.text_layout.as_ref(), measure))
+}
+
+/// Hit-test a node-local point against the same wrapped lines used for painting.
+/// The result is a byte offset into the node's original text.
+pub fn index_at_node(node: &Node, measure: &dyn TextMeasure, x: f64, y: f64) -> Option<usize> {
+    let Content::Text {
+        text,
+        font_family,
+        font_size,
+        font_weight,
+        font_style,
+        ..
+    } = &node.content
+    else {
+        return None;
+    };
+    let layout = layout_node(node, measure)?;
+    let font = Font {
+        family: font_family,
+        size: *font_size,
+        weight: font_weight.unwrap_or(400),
+        style: font_style.unwrap_or(FontStyle::Normal),
+    };
+    let row = layout
+        .ys
+        .iter()
+        .rposition(|top| y >= top + layout.padding)
+        .unwrap_or(0);
+    let line = &layout.lines[row];
+    let spans = node
+        .text_layout
+        .as_ref()
+        .map_or(&[][..], |l| l.spans.as_slice());
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let runs = styled_runs(&normalized, spans, layout.starts[row], line, &font);
+    let width = measure.styled_width(line, &font, &runs);
+    let offset = match layout.align {
+        TextAlign::Left => layout.padding,
+        TextAlign::Center => (layout.width - width) / 2.0,
+        TextAlign::Right => layout.width - layout.padding - width,
+    };
+    let byte = measure.index_at(line, &font, &runs, x - offset);
+    let units = layout.starts[row] as usize + line[..byte].encode_utf16().count();
+    let mut count = 0;
+    let mut previous_cr = false;
+    for (at, ch) in text.char_indices() {
+        if previous_cr && ch == '\n' {
+            previous_cr = false;
+            continue;
+        }
+        if count >= units {
+            return Some(at);
+        }
+        count += ch.len_utf16();
+        previous_cr = ch == '\r';
+    }
+    Some(text.len())
 }
 
 /// Breaks text on hard newlines and, when the layout has a width, wraps

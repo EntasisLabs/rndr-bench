@@ -311,6 +311,7 @@ pub struct CanvasEditor {
     pub snapping: Snapping,
     gesture: Gesture,
     text: Option<TextEdit>,
+    text_drag: bool,
     overlay: Overlay,
     last_error: Option<CanvasError>,
     seed: u64,
@@ -345,6 +346,7 @@ impl CanvasEditor {
             snapping: Snapping::default(),
             gesture: Gesture::Idle,
             text: None,
+            text_drag: false,
             overlay: Overlay::default(),
             last_error: None,
             seed: now_seed() & 0xffff_ffff,
@@ -735,6 +737,7 @@ impl CanvasEditor {
     /// Saves the text being edited. Empty text removes a node created by the
     /// edit, or deletes an existing one.
     pub fn finish_text(&mut self) -> bool {
+        self.text_drag = false;
         let Some(edit) = self.text.take() else {
             return false;
         };
@@ -782,6 +785,26 @@ impl CanvasEditor {
             },
             node,
         });
+        true
+    }
+
+    fn place_text_caret(&mut self, point: Vec2, extend: bool, measure: &dyn TextMeasure) -> bool {
+        let nodes = self.nodes();
+        let index = SceneIndex::with_measure(&nodes, measure);
+        let Some(edit) = &mut self.text else {
+            return false;
+        };
+        let Some(node) = index.get(&edit.id) else {
+            return false;
+        };
+        let local = index.world_matrix(node).inverse().apply(point);
+        let Some(byte) = rndr_canvas::text::index_at_node(node, measure, local.x, local.y) else {
+            return false;
+        };
+        edit.caret = byte;
+        if !extend {
+            edit.anchor = byte;
+        }
         true
     }
 
@@ -1043,6 +1066,15 @@ impl CanvasEditor {
         if pointer.pressed {
             changed |= self.press(pointer, input, measure);
         }
+        if self.text_drag {
+            if pointer.down || pointer.released {
+                changed |= self.place_text_caret(self.scene_point(pointer.position), true, measure);
+            }
+            if pointer.released || !pointer.down {
+                self.text_drag = false;
+            }
+            return changed;
+        }
         if pointer.down && !pointer.pressed {
             changed |= self.drag(pointer, input, measure);
         } else if pointer.down && pointer.pressed {
@@ -1090,12 +1122,19 @@ impl CanvasEditor {
             let inside = self.text.as_ref().is_some_and(|edit| {
                 let nodes = self.nodes();
                 let index = SceneIndex::with_measure(&nodes, measure);
-                index
-                    .get(&edit.id)
-                    .is_some_and(|n| index.bounds(n).contains(point))
+                index.get(&edit.id).is_some_and(|node| {
+                    let local = index.world_matrix(node).inverse().apply(point);
+                    rndr_canvas::text::layout_node(node, measure).is_some_and(|layout| {
+                        local.x >= 0.0
+                            && local.y >= 0.0
+                            && local.x <= layout.width
+                            && local.y <= layout.height
+                    })
+                })
             });
-            if inside {
-                return false;
+            if inside && pointer.button == Button::Primary && self.tool != Tool::Hand {
+                self.text_drag = true;
+                return self.place_text_caret(point, mods.shift, measure);
             }
             self.finish_text();
         }
@@ -1242,7 +1281,12 @@ impl CanvasEditor {
             }
             if picked.is_some_and(|n| matches!(n.content, Content::Text { .. })) {
                 self.selection = vec![target.clone()];
-                return self.edit_text(&target);
+                if self.edit_text(&target) {
+                    self.text_drag = true;
+                    self.place_text_caret(point, mods.shift, measure);
+                    return true;
+                }
+                return false;
             }
         }
         if mods.shift {

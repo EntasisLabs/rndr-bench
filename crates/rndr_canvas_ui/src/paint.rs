@@ -42,6 +42,31 @@ impl TextMeasure for EngineMeasure {
         self.styled_width(line, font, &[])
     }
 
+    fn index_at(&self, line: &str, font: &Font<'_>, runs: &[StyledRun], x: f64) -> usize {
+        let style = TextStyle {
+            family: font.family.to_string(),
+            size: font.size as f32,
+            weight: font.weight,
+            style: match font.style {
+                CanvasFontStyle::Italic => FontStyle::Italic,
+                CanvasFontStyle::Normal => FontStyle::Normal,
+            },
+            ..TextStyle::default()
+        };
+        let spans: Vec<_> = runs
+            .iter()
+            .map(|run| {
+                let mut span = TextSpan::new(run.start, run.end, Color::rgb(0.0, 0.0, 0.0));
+                span.weight = Some(run.weight);
+                span.italic = matches!(run.style, CanvasFontStyle::Italic);
+                span
+            })
+            .collect();
+        self.0
+            .layout(line, &style, &spans, f32::INFINITY)
+            .index_at(x as f32, 0.0)
+    }
+
     /// Shapes the line once with its spans, as [`paint_scene`] draws it.
     fn styled_width(&self, line: &str, font: &Font<'_>, runs: &[StyledRun]) -> f64 {
         let style = TextStyle {
